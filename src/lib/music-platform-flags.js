@@ -1,0 +1,294 @@
+/**
+ * 平台引擎开关 —— 可配置项（同构纯 JS：服务端读 env，浏览器 import 时回退默认，无副作用）。
+ *
+ * 每个「面向用户的搜索平台」都有两个独立开关：
+ *   - search：平台搜索引擎（决定该平台能否被关键词搜索 / 是否出现在搜索源 chips）；
+ *   - play:  平台播放引擎（决定内置直链引擎是否允许为该平台取播放 URL / resolve 是否宣称 playable）。
+ *
+ * 平台全集 MUSIC_FLAG_PLATFORM_KEYS 覆盖前端可选的搜索平台（GD 通道命名）：
+ * netease / kuwo / joox 走 GD 搜索引擎与 GD 直链；tencent / kugou / migu 走自研直连
+ * 搜索（self-search，tencent 模块仍在注册表内）；kugou 已内置官方试听直链（getSongInfo，
+ * 免费档 128k mp3，见 src/lib/self-search/kugou.js），migu 仍无内置直链引擎。
+ *
+ * 默认值（2026-09 起：search / play 两维 6 平台全开——开关交由部署 env 与设置面板收敛）：
+ *   - search / play 均默认 true；tencent 与 migu 虽默认放开，取链仍可能失败：
+ *     tencent 的 GD 取链上游不开放（实测 400），migu 无内置直链引擎——需要时用
+ *     env 黑名单单独停用（MUSIC_PLATFORM_PLAY_DISABLED=tencent,migu）；
+ *   - kugou 为官方免费 128k 试听直链（VIP/付费曲取链会失败，见 failType=vip-only）。
+ *
+ * 配置方式（环境变量）：
+ *   1) 正向覆盖（JSON 对象，仅列出需要覆盖的平台即可；或 "all" 全开）：
+ *        MUSIC_PLATFORM_SEARCH='{"tencent":true}'      # 打开 QQ 音乐搜索
+ *        MUSIC_PLATFORM_PLAY='{"netease":false}'        # 关闭网易云取链
+ *        MUSIC_PLATFORM_PLAY='all'                      # 全部平台开放播放引擎
+ *   2) 禁用黑名单（逗号分隔平台键；留空 / "default" 回退内置默认）：
+ *        MUSIC_PLATFORM_SEARCH_DISABLED=tencent
+ *        MUSIC_PLATFORM_PLAY_DISABLED=tencent,kugou,migu
+ *      黑名单 = 最终闸门：列出的平台在本维度强制关闭，即使被正向覆盖 / "all" 打开；
+ *      未列出的平台保持默认 / 正向覆盖结果。非法 JSON / 非法平台键会被忽略并告警日志。
+ *   3) 整体下线便捷变量（逗号分隔平台键；最终闸门）：
+ *        MUSIC_PLATFORM_OFF=tencent,kugou,migu
+ *      等价于把列出的平台同时写进 search / play 两个禁用黑名单（两个维度一并强制关闭），
+ *      供「整体下线某平台」时只配一个变量；只需单独停某一维度时仍用 2) 的两个黑名单。
+ *
+ * 内置播放引擎总开关（第四维，独立于平台矩阵）：
+ *   - 内置播放引擎 = 站点自带的取直链通道（GD 公共上游 /api/music + 自研直连
+ *     /api/music/self），这是「零配置即可播放」的那部分能力；
+ *   - 关闭后：站点不再经上述内置通道取播放直链；**搜索不受影响**
+ *     （search 维度与 /api/music/self?action=search、歌词/封面等数据通道照常）；
+ *   - env：MUSIC_BUILTIN_PLAY=off 为**运维终闸**（面板不可再开启），on / 空 / default
+ *     为基线（默认开启，面板可自由开关）；配置文档字段 builtinPlay（null = 被终闸锁定）；
+ *   - 消费方：/api/music、/api/music/self 的 action=url 拦截，resolve（playable 判定），
+ *     caps 下发 { enabled, locked }，前端 music-caps / music-client 据此收敛候选与取链。
+ *
+ * 消费方：/api/music（search/url 校验）、/api/music/self（自研搜索校验与列表）、
+ * resolve/route.js（playable 判定）、/api/music/caps（能力矩阵下发，前端据此过滤 chips
+ * 与跨源现搜候选）。前端侧 music-caps.ts 通过 caps 端点拉取部署期真实开关，失败时回退本文件默认。
+ */
+
+/** 参与引擎开关的搜索平台全集（顺序即展示/候选顺序） */
+export const MUSIC_FLAG_PLATFORM_KEYS = [
+  "netease",
+  "tencent",
+  "kugou",
+  "kuwo",
+  "migu",
+  "joox",
+];
+
+/** 各平台默认开关（与上表顺序对应；2026-09 起两维默认全开） */
+export const MUSIC_PLATFORM_DEFAULT_FLAGS = {
+  search: {
+    netease: true,
+    tencent: true, // 默认放开；需要收敛时用 MUSIC_PLATFORM_SEARCH_DISABLED / 面板停用
+    kugou: true,
+    kuwo: true,
+    migu: true,
+    joox: true,
+  },
+  play: {
+    netease: true,
+    tencent: true, // GD 取链上游不开放（实测 400），取链会失败，但开关默认放开
+    kugou: true, // 内置酷狗官方试听直链（getSongInfo，免费档 128k mp3）
+    kuwo: true,
+    migu: true, // 无内置直链引擎；取链会失败
+    joox: true,
+  },
+};
+
+/**
+ * 「自动换源」行为配置默认值（同构：前端面板与后端求值共用同一份，避免两端漂移）。
+ * enabled          自动换源总开关
+ * maxAttempts      单轮直链请求上限（队列候选 + 跨源现搜候选合计）
+ * crossSearch      队列内无自动候选时是否跨音源现搜同名歌曲
+ * showManualDialog 自动换源收尾仍失败时是否弹人工选版面板
+ */
+export const MUSIC_BEHAVIOR_DEFAULTS = {
+  autoFallback: {
+    enabled: true,
+    maxAttempts: 4,
+    crossSearch: true,
+    showManualDialog: true,
+  },
+};
+
+/** 行为配置取值边界（面板步进与后端校验共用） */
+export const MUSIC_BEHAVIOR_LIMITS = {
+  maxAttempts: { min: 1, max: 8 },
+};
+
+const ENV_NAMES = {
+  search: "MUSIC_PLATFORM_SEARCH",
+  play: "MUSIC_PLATFORM_PLAY",
+};
+
+/** 禁用黑名单 env（逗号分隔平台键；优先级最高，最终闸门） */
+const DISABLED_ENV_NAMES = {
+  search: "MUSIC_PLATFORM_SEARCH_DISABLED",
+  play: "MUSIC_PLATFORM_PLAY_DISABLED",
+};
+
+/**
+ * 整体下线 env（逗号分隔平台键；最终闸门）——便捷写法，等价于把列出的平台同时
+ * 写入 search / play 两个禁用黑名单，两个维度一并强制关闭。
+ */
+const OFF_ENV_NAME = "MUSIC_PLATFORM_OFF";
+
+const KEY_SET = new Set(MUSIC_FLAG_PLATFORM_KEYS);
+
+/** 读 env（浏览器 / edge 无 process 时返回空串） */
+function readEnv(name) {
+  if (typeof process === "undefined" || !process.env) return "";
+  const v = String(process.env[name] || "").trim();
+  return v;
+}
+
+/**
+ * 解析某维度 env 覆盖：
+ * - 空串 / "default" → null（不覆盖）；
+ * - "all" → 该维度全 true；
+ * - JSON 对象 → 逐平台覆盖（true/false），非法键忽略。
+ */
+function parseOverride(kind, raw) {
+  if (!raw || raw === "default") return null;
+  // "all" = 该维度全部平台开启（默认矩阵已全开，本写法用于显式压过自定义默认）
+  if (raw === "all") {
+    return Object.fromEntries(
+      MUSIC_FLAG_PLATFORM_KEYS.map((key) => [key, true])
+    );
+  }
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      throw new Error("not a flat object");
+    }
+    const out = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (!KEY_SET.has(key)) {
+        console.warn(`[music-flags] 忽略未知平台键 ${key}（${ENV_NAMES[kind]}）`);
+        continue;
+      }
+      if (typeof value !== "boolean") {
+        console.warn(`[music-flags] 忽略非布尔值 ${key}=${value}（${ENV_NAMES[kind]}）`);
+        continue;
+      }
+      out[key] = value;
+    }
+    return out;
+  } catch {
+    console.warn(
+      `[music-flags] ${ENV_NAMES[kind]} 不是合法 JSON 对象或 "all"，已忽略：${raw}`
+    );
+    return null;
+  }
+}
+
+/**
+ * 解析逗号分隔平台键 env 为数组（envName 仅用于告警文案）：
+ * - 空串 / "default" → []（不覆盖，回退内置默认）；
+ * - 其余按逗号拆分并 trim，非法平台键忽略并告警。
+ */
+function parseKeyList(raw, envName) {
+  if (!raw || raw === "default") return [];
+  const list = [];
+  for (const part of raw.split(",")) {
+    const key = part.trim();
+    if (!key) continue;
+    if (!KEY_SET.has(key)) {
+      console.warn(`[music-flags] 忽略未知平台键 ${key}（${envName}）`);
+      continue;
+    }
+    list.push(key);
+  }
+  return list;
+}
+
+/** 解析某维度禁用黑名单 env（逗号分隔平台键） */
+function parseDisabledList(kind, raw) {
+  return parseKeyList(raw, DISABLED_ENV_NAMES[kind]);
+}
+
+/** 解析整体下线 env（MUSIC_PLATFORM_OFF，逗号分隔平台键） */
+function parseOffList(raw) {
+  return parseKeyList(raw, OFF_ENV_NAME);
+}
+
+/**
+ * 某维度被 env 终闸锁定的平台键（MUSIC_PLATFORM_OFF ∪ 本维度 *_DISABLED），
+ * 按全集顺序返回。锁定槽在配置文档里恒存 null（面板不可编辑），
+ * 求值时无论文档写什么一律强制 false —— 这是不可让渡的运维能力。
+ */
+export function lockedPlatformKeys(kind) {
+  const locked = new Set();
+  for (const key of parseOffList(readEnv(OFF_ENV_NAME))) locked.add(key);
+  for (const key of parseDisabledList(kind, readEnv(DISABLED_ENV_NAMES[kind]))) {
+    locked.add(key);
+  }
+  return MUSIC_FLAG_PLATFORM_KEYS.filter((key) => locked.has(key));
+}
+
+/**
+ * 解析某维度（"search" | "play"）生效的开关表：
+ * 默认矩阵 → 正向 env 覆盖（JSON / "all"）→ 禁用黑名单（最终闸门，强制关）。
+ * 每次调用动态读 env（对齐 gdmusic.getUpstreamBases），便于部署后 env 生效与单测注入。
+ */
+export function resolveMusicPlatformFlags(kind) {
+  const defaults = MUSIC_PLATFORM_DEFAULT_FLAGS[kind] || {};
+  const override = parseOverride(kind, readEnv(ENV_NAMES[kind]));
+  const table = override ? { ...defaults, ...override } : { ...defaults };
+  // 最终闸门：整体下线变量与本维度禁用黑名单取并集——列出的平台本维度一律强制 false
+  for (const key of lockedPlatformKeys(kind)) {
+    table[key] = false;
+  }
+  return table;
+}
+
+/** 某平台是否开启某维度开关（可选传入显式开关表，不传则读 env 基线） */
+export function isMusicPlatformEnabled(kind, source, table) {
+  const t = table || resolveMusicPlatformFlags(kind);
+  return t[source] === true;
+}
+
+/** 简写：搜索开关（可选传入显式开关表） */
+export function isPlatformSearchEnabled(source, table) {
+  return isMusicPlatformEnabled("search", source, table);
+}
+
+/** 简写：播放引擎开关（可选传入显式开关表） */
+export function isPlatformPlayEnabled(source, table) {
+  return isMusicPlatformEnabled("play", source, table);
+}
+
+/** 某维度开启的平台列表（按 MUSIC_FLAG_PLATFORM_KEYS 顺序；可选传入显式开关表） */
+export function enabledPlatformList(kind, table) {
+  const t = table || resolveMusicPlatformFlags(kind);
+  return MUSIC_FLAG_PLATFORM_KEYS.filter((key) => t[key] === true);
+}
+
+// ---------------------------------------------------------------------------
+// 内置播放引擎总开关（站点自带取直链通道：GD 公共上游 + 自研直连）
+// ---------------------------------------------------------------------------
+
+/** 内置播放引擎总开关的默认值（零配置即可播放的那部分能力，默认开启） */
+export const MUSIC_BUILTIN_PLAY_DEFAULT = true;
+
+/** 总开关 env 名（`off` = 运维终闸，面板不可再开启；`on` / 空 = 基线） */
+export const MUSIC_BUILTIN_PLAY_ENV = "MUSIC_BUILTIN_PLAY";
+
+const BUILTIN_PLAY_ON_VALUES = new Set(["on", "true", "1", "yes", "enabled"]);
+const BUILTIN_PLAY_OFF_VALUES = new Set(["off", "false", "0", "no", "disabled"]);
+
+/**
+ * 解析 MUSIC_BUILTIN_PLAY：
+ *   - 空 / "default" → null（不覆盖，回退默认开启）；
+ *   - off/false/0/disabled → false（终闸：强制关闭且面板不可开启）；
+ *   - on/true/1/enabled → true（基线开启，面板仍可关闭）；
+ *   - 其它非法值 → null 并告警（回退默认）。
+ */
+function parseBuiltinPlayEnv(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  if (!v || v === "default") return null;
+  if (BUILTIN_PLAY_OFF_VALUES.has(v)) return false;
+  if (BUILTIN_PLAY_ON_VALUES.has(v)) return true;
+  console.warn(
+    `[music-flags] ${MUSIC_BUILTIN_PLAY_ENV} 非法取值已忽略：${raw}（可用 on / off）`
+  );
+  return null;
+}
+
+/** 内置播放引擎的部署基线（env 未配置时 = 默认开启） */
+export function resolveBuiltinPlayBaseline() {
+  const v = parseBuiltinPlayEnv(readEnv(MUSIC_BUILTIN_PLAY_ENV));
+  return v === null ? MUSIC_BUILTIN_PLAY_DEFAULT : v;
+}
+
+/** 内置播放引擎是否被 env 终闸锁定（MUSIC_BUILTIN_PLAY=off：配置文档无法复活） */
+export function isBuiltinPlayLocked() {
+  return parseBuiltinPlayEnv(readEnv(MUSIC_BUILTIN_PLAY_ENV)) === false;
+}
+
+/** 内置播放引擎是否开启（可选传入已求值的生效值，便于路由复用同一次求值） */
+export function isBuiltinPlayEnabled(effective) {
+  if (typeof effective === "boolean") return effective;
+  return resolveBuiltinPlayBaseline();
+}

@@ -1,0 +1,22 @@
+{
+  "name": "mediaget-desktop",
+  "version": "0.1.24",
+  "description": "MediaGet Windows desktop",
+  "author": "hotier; Windows packaging by Codex",
+  "license": "MIT",
+  "main": "main.cjs",
+  "dependencies": {
+    "undici": "7.16.0"
+  },
+  "devDependencies": {
+    "electron": "42.0.0"
+  },
+  "scripts": {
+    "start": "node start.cjs",
+    "test": "node --test *.test.cjs",
+    "install:runtime": "node node_modules/electron/install.js"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

@@ -1,0 +1,10 @@
+process.on('message',message=>{if(message==='mediaget-shutdown')process.exit(0);});
+process.on('disconnect',()=>process.exit(0));
+require('./youtube-proxy.cjs').installYoutubeProxy();
+globalThis.__mediagetDesktopParsers={
+ youtube:require('./youtube.cjs').parseYoutube,
+ tiktok:require('./tiktok.cjs').parseTiktok,
+ instagram:require('./instagram.cjs').parseInstagram
+};
+require('./cookie-fetch.cjs').installCookieFetch();
+require(require('node:path').join(process.cwd(),'server.js'));

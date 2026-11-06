@@ -1,0 +1,119 @@
+import type { VideoPlatformKey } from "@/config/video-platforms";
+import { extractUrlFromShareText } from "@/lib/share-text";
+
+export type Platform = VideoPlatformKey;
+
+// 提取文本中的第一个 URL（包含常见分享文案里的 URL）。
+// http(s) 链接提取逻辑与后端 /api/parse-text 共用 src/lib/share-text.ts，
+// 避免前后端两套正则漂移不一致；此处额外兜底「无协议头的裸域名短链」。
+export function extractUrl(text: string): string | null {
+  const httpUrl = extractUrlFromShareText(text);
+  if (httpUrl) return httpUrl;
+
+  const bareUrlMatch = text.match(
+    /(?:^|\s)((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\/[^\s\u3000\u00A0，。！？、；：【】（）《》"'“”‘’<>]+)/
+  );
+  if (bareUrlMatch && bareUrlMatch[1]) {
+    return bareUrlMatch[1].replace(/[，。！？、；：.,!?;]+$/, "");
+  }
+
+  return null;
+}
+
+/** 是否包含任一受支持平台的 URL 片段（用于剪贴板自动读取等） */
+export function hasValidVideoUrl(text: string): boolean {
+  const supported = [
+    "douyin.com",
+    "iesdouyin.com",
+    "v.douyin.com",
+    "snssdk.com",
+    "kuaishou.com",
+    "v.kuaishou.com",
+    "weibo.com",
+    "weibo.cn",
+    "video.weibo.com",
+    "xiaohongshu.com",
+    "xhslink.com",
+    "xhslink.cn",
+    "bilibili.com",
+    "b23.tv",
+    "music.douyin.com",
+    "ixigua.com",
+    "xiaochuankeji.cn",
+    "acfun.cn",
+    "twitter.com",
+    // 必须带 `//` 边界：裸 `x.com` 会把 pipix.com 等第三方域名误判成 X
+    "//x.com/",
+    "t.co",
+    "tiktok.com",
+    "vm.tiktok.com",
+    "vt.tiktok.com",
+    // 海外主流社媒
+    "instagram.com",
+    "instagr.am",
+    "youtube.com",
+    "youtu.be",
+  ];
+  const t = text.toLowerCase();
+  return supported.some((d) => t.includes(d));
+}
+
+/**
+ * 根据文本粗略检测平台（先匹配更具体的域名）
+ * 识别不到时返回 null（不再兜底返回 douyin——任意 URL 都被当抖音解析会误导用户）
+ */
+export function detectPlatform(text: string): VideoPlatformKey | null {
+  const firstUrl = extractUrl(text) || "";
+  const lower = firstUrl.toLowerCase();
+
+  if (lower.includes("music.douyin.com")) return "qsmusic";
+  if (
+    lower.includes("t.co/") ||
+    lower.includes("twitter.com/") ||
+    /(?:\/\/|\.)x\.com\//.test(lower)
+  ) {
+    return "twitter";
+  }
+  if (lower.includes("b23.tv") || lower.includes("bilibili.com"))
+    return "bilibili";
+  if (lower.includes("acfun.cn")) return "acfun";
+  if (lower.includes("ixigua.com")) return "xigua";
+  if (lower.includes("xiaochuankeji.cn")) return "zuiyou";
+
+  if (lower.includes("instagram.com") || lower.includes("instagr.am"))
+    return "instagram";
+  if (
+    lower.includes("youtube.com") ||
+    lower.includes("youtu.be") ||
+    lower.includes("youtube-nocookie.com")
+  ) {
+    return "youtube";
+  }
+  if (
+    lower.includes("xhslink.com") ||
+    lower.includes("xhslink.cn") ||
+    lower.includes("xiaohongshu.com")
+  )
+    return "xhs";
+  if (
+    lower.includes("video.weibo.com") ||
+    lower.includes("weibo.com") ||
+    lower.includes("weibo.cn")
+  )
+    return "weibo";
+  if (lower.includes("v.kuaishou.com") || lower.includes("kuaishou.com"))
+    return "kuaishou";
+  if (
+    lower.includes("tiktok.com") ||
+    lower.includes("vm.tiktok.com") ||
+    lower.includes("vt.tiktok.com")
+  )
+    return "tiktok";
+  if (lower.includes("snssdk.com") || lower.includes("douyin.com"))
+    return "douyin";
+
+  return null;
+}
+
+/** 与 extractUrl 完全一致（历史兼容导出，前端表单直接使用） */
+export const extractUrlFromText = extractUrl;

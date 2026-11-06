@@ -1,0 +1,402 @@
+"use client";
+import { useEffect, useRef, useState } from "react";
+import ProxiedImage from "@/components/ui/ProxiedImage";
+import { Download, Music, Pause, Play } from "lucide-react";
+import { buildVideoProxyUrl } from "@/utils/videoProxy";
+import { Button } from "@/components/ui/button";
+import type { VideoPlatformKey } from "@/config/video-platforms";
+import { useVideoMediaSession } from "./use-video-media-session";
+import { QualitySelect } from "./DownloadRow";
+
+/**
+ * 统一视频展示卡片（简化版）：上方封面图 + 下方「播放视频 / 下载视频」两个链接。
+ * 各平台复用此卡片，标题/作者等信息由各平台组件自行展示。
+ *
+ * 防盗链处理：小红书 xhscdn 视频直链有 Referer 防盗链，新窗口打开会 403。
+ * 这里对需要代理的直链自动走 /api/video-proxy（带 Referer），保证可播放、可下载。
+ *
+ * 两种交互模式：
+ * - inline=false（默认）：封面/播放/下载均为直链新窗口打开。
+ * - inline=true：封面或「播放」按钮在当前页面内嵌 <video> 播放，下载按钮在当前页面触发真实下载。
+ *   适合已走代理或直链可直播的源（小红书 / B站），避免新开标签页，体验更好。
+ *
+ * 系统媒体会话（Media Session）：当前页内嵌播放时（inline 且播放器已展开）把封面与标题上报给
+ * 操作系统「正在播放」控件（锁屏 / 通知栏 / 系统媒体键，见 use-video-media-session）；多分P 跟随
+ * 当前播放项（切P即刷新元信息与封面，上下P回灌系统「上一首 / 下一首」键）。直链在新标签页里
+ * 播放的场景由那个标签页自己负责，本页不上报。
+ */
+
+/** 多分P项：播放卡片内切换源用（结构与 ParsedVideoItem 子集兼容） */
+export interface PosterPart {
+  title?: string;
+  durationFormat?: string;
+  url: string;
+  cover?: string;
+}
+
+type AccentKey = "blue" | "red" | "orange" | "pink" | "neutral" | "dy";
+
+const ACCENTS: Record<AccentKey, string> = {
+  // B站
+  blue: "from-[#00aeec] to-[#4dc9ff]",
+  // 微博
+  red: "from-[#e6162d] to-[#ff4d6a]",
+  // 快手
+  orange: "from-[#ff6600] to-[#ff9933]",
+  // 小红书
+  pink: "from-[#ff2442] to-[#ff5c7c]",
+  // 通用平台
+  neutral: "from-neutral-500 to-neutral-400",
+  // 抖音
+  dy: "from-[#fe2c55] to-[#ff6b8a]",
+};
+
+interface VideoPosterCardProps {
+  /** 视频直链 */
+  url: string;
+  /** 封面图地址（可选，无封面时只显示按钮行） */
+  cover?: string;
+  /** 封面 alt */
+  alt?: string;
+  /** 品牌色 */
+  accent?: AccentKey;
+  /** 竖屏视频封面用 9:16，默认宽屏 16:9 */
+  tall?: boolean;
+  /** 播放按钮文案，默认「播放视频」 */
+  playText?: string;
+  /** 下载按钮文案，默认「下载视频」 */
+  downloadText?: string;
+  /** 音频直链（可选），存在时额外显示「下载音频」按钮 */
+  audioUrl?: string;
+  /** 音频按钮文案，默认「下载音频」 */
+  audioText?: string;
+  /** 下载文件名（内嵌模式下直链跨域时走代理强制保存，默认「video.mp4」） */
+  downloadName?: string;
+  /** 是否显示下载按钮，默认 true */
+  showDownload?: boolean;
+  /** 自定义下载按钮点击：提供后按钮改为按钮型（不直接下载），如滚动定位到下载区。
+   *  参数为当前分P index（多P时为 partsList 下标，单视频时为 0） */
+  onDownloadClick?: (index: number) => void;
+  /** 是否显示「播放视频」按钮（默认 true；false 时封面自带点击 + 下方只剩下载） */
+  showPlay?: boolean;
+  /** 内嵌播放模式：封面/播放按钮在当前页面内嵌 <video> 播放，下载走代理真实下载（适合已代理的源，如小红书） */
+  inline?: boolean;
+  /** 多分P列表（可选）：>1 时播放卡片内显示分P切换条，播放/封面/下载跟随当前分P */
+  parts?: PosterPart[];
+  /** 多清晰度直链（可选）：>1 时在操作区上方显示档位下拉，播放/下载跟随所选档 */
+  qualities?: { url: string; label: string }[];
+  /** 整体视频标题：系统媒体控件与站点标题用（缺失时不上报播放会话） */
+  title?: string;
+  /** 上传者（UP主 / 博主）：系统媒体控件第二行 */
+  author?: string;
+  /** 平台 key：系统媒体控件第三行与封面回退（品牌 logo）用 */
+  platform?: VideoPlatformKey;
+}
+
+export default function VideoPosterCard({
+  url,
+  cover,
+  alt,
+  accent = "neutral",
+  tall = false,
+  playText = "播放视频",
+  downloadText = "下载视频",
+  audioUrl,
+  audioText = "下载音频",
+  downloadName = "video.mp4",
+  showDownload = true,
+  onDownloadClick,
+  showPlay = true,
+  inline = false,
+  parts,
+  qualities,
+  title,
+  author,
+  platform,
+}: VideoPosterCardProps) {
+  const gradient = ACCENTS[accent];
+  // 多分P：parts 存在且 >1 时启用分P切换，当前分P决定播放/封面/下载源
+  const partsList = Array.isArray(parts) && parts.length > 1 ? parts : null;
+  const [partIndex, setPartIndex] = useState(0);
+  // 单视频多档位：初始选中与主直链同 URL 的档位（没有则第一档），
+  // 避免解析器给出的主直链与下拉首档指向不同 CDN 时悄悄换源。
+  const qualityList =
+    !partsList && Array.isArray(qualities) && qualities.length > 1
+      ? qualities
+      : null;
+  const [qualityIndex, setQualityIndex] = useState(() => {
+    if (!Array.isArray(qualities)) return 0;
+    const match = qualities.findIndex((q) => q.url === url);
+    return match >= 0 ? match : 0;
+  });
+  const activePart = partsList ? partsList[partIndex] : null;
+  const activeQuality = qualityList
+    ? qualityList[Math.min(qualityIndex, qualityList.length - 1)]
+    : null;
+  const currentUrl = activeQuality?.url || activePart?.url || url;
+  const currentCover = activePart?.cover || cover;
+  // 防盗链直链走代理，保证可播放、可下载
+  const playUrl = buildVideoProxyUrl(currentUrl);
+  // 内嵌播放状态管理：
+  // - expanded：播放器是否已展开（展开后封面隐藏）
+  // - playing：是否实际在播放（由 <video> 的 play/pause 事件同步）
+  // - playError：媒体加载失败（源地址不可用/被 CDN 拒绝），用于展示提示
+  const [expanded, setExpanded] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [playError, setPlayError] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // 展开播放器后显式触发播放：autoPlay 属性在部分浏览器（严格自动播放策略/无头
+  // 环境）下不可靠，这里在视频挂载后 play()——点击按钮带来的用户激活窗口内可
+  // 正常通过；被拦截时静默，用户可再点一次，媒体加载错误由 onError 提示。
+  useEffect(() => {
+    if (inline && expanded && videoRef.current) {
+      videoRef.current.play().catch(() => {});
+    }
+  }, [inline, expanded]);
+
+  // 内嵌模式：点击封面/播放按钮 —— 未展开则展开并自动播放，已展开则播放/暂停切换。
+  // playing 状态一律由 <video> 的 onPlay/onPause 事件同步，不手动置位，
+  // 避免媒体加载失败时按钮状态与真实播放状态错乱。
+  const handleInlinePlay = () => {
+    if (!expanded) {
+      setExpanded(true);
+      setPlayError(false);
+    } else if (videoRef.current) {
+      if (playing) {
+        videoRef.current.pause();
+      } else {
+        videoRef.current.play().catch(() => {});
+      }
+    }
+  };
+
+  // 切换分P：内嵌播放已展开时直接换源续播，未展开时切换封面
+  const handlePartChange = (i: number) => {
+    if (!partsList) return;
+    setPartIndex(i);
+    if (inline && expanded && videoRef.current) {
+      setPlayError(false);
+      videoRef.current.src = buildVideoProxyUrl(partsList[i].url);
+      videoRef.current.play().catch(() => {});
+    }
+  };
+
+  // 系统媒体会话：仅当前页内嵌播放（inline 且播放器已展开）时上报，元信息与封面跟随当前分P
+  const canPrevPart = Boolean(partsList) && partIndex > 0;
+  const canNextPart = Boolean(partsList) && partIndex < (partsList?.length ?? 1) - 1;
+  useVideoMediaSession({
+    info:
+      inline && expanded && currentUrl
+        ? {
+            title,
+            author,
+            platform,
+            partTitle: activePart?.title,
+            sessionKey: `${partIndex}:${currentUrl}`,
+          }
+        : null,
+    coverUrl: currentCover || "",
+    playing,
+    // 快进快退的基准位置直读媒体元素，避免 timeupdate 高频重渲染整张卡片
+    getCurrentTime: () => videoRef.current?.currentTime ?? 0,
+    onPlay: () => {
+      videoRef.current?.play().catch(() => {});
+    },
+    onPause: () => videoRef.current?.pause(),
+    // 首/末分P 不给回调，系统控件就不会出现点了没反应的「上一首 / 下一首」
+    onPrev: canPrevPart ? () => handlePartChange(partIndex - 1) : undefined,
+    onNext: canNextPart ? () => handlePartChange(partIndex + 1) : undefined,
+    onSeek: (time) => {
+      const el = videoRef.current;
+      if (!el || !Number.isFinite(time)) return;
+      el.currentTime = Math.max(0, time);
+    },
+  });
+
+  return (
+    <div className="space-y-3">
+      {/* 封面图 / 内嵌播放器 */}
+      {currentCover && !expanded && (
+        <a
+          href={inline ? undefined : playUrl}
+          target={inline ? undefined : "_blank"}
+          rel={inline ? undefined : "noopener noreferrer"}
+          onClick={inline ? handleInlinePlay : undefined}
+          className="group block rounded-2xl overflow-hidden bg-black cursor-pointer">
+          <div
+            className={`relative w-full ${
+              tall ? "aspect-[9/16] sm:aspect-video" : "aspect-video"
+            }`}>
+            <ProxiedImage
+              src={currentCover}
+              alt={alt || "视频封面"}
+              fill
+              className="object-contain"
+            />
+            {/* 中心播放图标：提示用户可点击封面播放，hover 时轻微放大 */}
+            <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover:bg-black/15 transition-colors duration-300">
+              <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-white/90 group-hover:bg-white text-black flex items-center justify-center shadow-lg transition-transform duration-300 group-hover:scale-110">
+                <Play className="w-7 h-7 sm:w-9 sm:h-9 ml-1" fill="currentColor" />
+              </div>
+            </div>
+          </div>
+        </a>
+      )}
+
+      {/* 内嵌播放器（inline 模式点击播放后展开，播放状态与按钮联动） */}
+      {inline && expanded && (
+        <div className="rounded-2xl overflow-hidden bg-black">
+          <video
+            ref={videoRef}
+            src={playUrl}
+            controls
+            autoPlay
+            playsInline
+            onPlay={() => {
+              setPlaying(true);
+              setPlayError(false);
+            }}
+            onPause={() => setPlaying(false)}
+            // 播放结束不会触发 pause 事件：这里同步按钮与系统控件的播放态
+            onEnded={() => setPlaying(false)}
+            onError={() => {
+              setPlaying(false);
+              setPlayError(true);
+            }}
+            className={`w-full ${
+              tall ? "aspect-[9/16] sm:aspect-video" : "aspect-video"
+            } object-contain`}
+          />
+          {playError && (
+            <p className="flex items-center gap-1.5 px-4 py-2 text-xs text-red-400 bg-black/70">
+              视频加载失败：源地址不可用，可尝试点击「下载视频」获取文件。
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* 多分P切换条：仅有多P时显示，点击切换播放/封面/下载源 */}
+      {partsList && (
+        <div className="flex flex-wrap gap-1.5">
+          {partsList.map((p, i) => (
+            <button
+              key={i}
+              type="button"
+              onClick={() => handlePartChange(i)}
+              aria-pressed={i === partIndex}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+                i === partIndex
+                  ? "bg-glass-3 font-medium text-primary"
+                  : "bg-glass-1 text-muted hover:bg-glass-2"
+              }`}>
+              {p.title || `P${i + 1}`}
+              {p.durationFormat && (
+                <span className="text-xs opacity-70">{p.durationFormat}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 单视频多档位：右上角下拉切换清晰度，播放与下载同步跟随 */}
+      {qualityList && (
+        <div className="flex justify-end">
+          <QualitySelect
+            options={qualityList}
+            value={qualityIndex}
+            onChange={setQualityIndex}
+            ariaLabel="清晰度"
+          />
+        </div>
+      )}
+
+      {/* 操作按钮：播放 / 下载（内嵌模式下封面或播放按钮均可触发当前页内嵌播放）
+          移动端两行布局：播放独占第一行，下载视频/音频在第二行 5:5 平分（无音频时下载占满整行）；
+          桌面端 sm:contents 让内层失效，三个按钮保持单行等宽 */}
+      <div className="flex flex-col gap-3 sm:flex-row">
+        {showPlay &&
+          (inline ? (
+            <Button
+              type="button"
+              variant="default"
+              size="lg"
+              onClick={handleInlinePlay}
+              className={`sm:flex-1 bg-gradient-to-r ${gradient} hover:opacity-90`}>
+              {playing ? (
+                <Pause className="h-5 w-5" />
+              ) : (
+                <Play className="h-5 w-5" />
+              )}
+              {expanded ? (playing ? "暂停" : "继续播放") : playText}
+            </Button>
+          ) : (
+            <Button
+              asChild
+              variant="default"
+              size="lg"
+              className={`sm:flex-1 bg-gradient-to-r ${gradient} hover:opacity-90`}>
+              <a href={playUrl} target="_blank" rel="noopener noreferrer">
+                <Play className="h-5 w-5" />
+                {playText}
+              </a>
+            </Button>
+          ))}
+
+        {/* 第二行：下载视频 + 音频下载，移动端 5:5 平分（无音频时下载占满）；桌面端 contents 并入单行 */}
+        <div className="flex gap-3 sm:contents">
+        {showDownload &&
+        (onDownloadClick ? (
+          /* 自定义下载行为（如滚动定位到下载区），不直接下载 */
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            className="flex-1"
+            onClick={() => onDownloadClick(partIndex)}>
+            <Download className="h-5 w-5" />
+            {downloadText}
+          </Button>
+        ) : inline && !playUrl.startsWith("/api/video-proxy") ? (
+          /* 内嵌模式 + 直链跨域：download 属性对跨域 URL 无效，走代理强制保存文件（抖音等） */
+          <Button asChild variant="outline" size="lg" className="flex-1">
+            <a
+              href={`/api/video-proxy?url=${encodeURIComponent(
+                currentUrl
+              )}&download=1&filename=${encodeURIComponent(downloadName)}`}
+              target="_blank"
+              rel="noopener noreferrer">
+              <Download className="h-5 w-5" />
+              {downloadText}
+            </a>
+          </Button>
+        ) : (
+          <Button asChild variant="outline" size="lg" className="flex-1">
+            <a
+              href={playUrl}
+              target={inline ? undefined : "_blank"}
+              rel={inline ? undefined : "noopener noreferrer"}
+              download={inline ? downloadName : undefined}>
+              <Download className="h-5 w-5" />
+              {downloadText}
+            </a>
+          </Button>
+        ))}
+
+        {/* 音频下载：与视频下载同款式（中性描边），点击新窗口打开音频直链 */}
+        {audioUrl && (
+        <Button asChild variant="outline" size="lg" className="flex-1">
+            <a
+              href={audioUrl}
+              target="_blank"
+              rel="noopener noreferrer">
+              <Music className="h-5 w-5" />
+              {audioText}
+            </a>
+          </Button>
+        )}
+        </div>
+      </div>
+    </div>
+  );
+}

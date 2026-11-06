@@ -1,0 +1,138 @@
+"use client";
+import ProxiedImage from "@/components/ui/ProxiedImage";
+import { ApiResponse, ParseData } from "@/types/api";
+import VideoPosterCard from "./VideoPosterCard";
+import ParseInfoPanel from "./ParseInfoPanel";
+import CaptionBox from "./CaptionBox";
+import CollapsibleGallery from "./CollapsibleGallery";
+import { Card } from "@/components/ui/card";
+import TruncatedText from "@/components/ui/truncated-text";
+
+interface GenericParsedVideoProps {
+  data: ApiResponse;
+  /** 平台 key，供信息面板按平台展示字段 */
+  platform?: string;
+}
+
+export default function GenericParsedVideo({
+  data,
+  platform,
+}: GenericParsedVideoProps) {
+  if (!data.data) {
+    return null;
+  }
+
+  const d = data.data as ParseData;
+  // 未显式传入 platform 时，回退到响应里的 platform 字段
+  // （统一渲染注册表只传 data，保证平台感知的字段表仍能命中）
+  const effectivePlatform = platform ?? data.platform;
+  // 视频/图片一律直链 + 窗口展示（不再直接 <video> 播放、不再走 /api/proxy）
+  // type=image 时 url 指向图片直链，不能再按视频卡片渲染（避免封面比例错位 + 伪播放按钮）
+  const images = d.images?.filter(Boolean) || [];
+  const isImage = d.type === "image" || (!d.url && images.length > 0);
+  const isText = d.type === "text" || (!d.url && images.length === 0);
+  const videoUrl = isImage || isText ? "" : d.url || "";
+
+  return (
+    <div className="space-y-5" style={{ touchAction: "pan-y" }}>
+      <Card className="p-5">
+        <div className="flex items-center gap-4">
+          {d.avatar && (
+            <ProxiedImage
+              src={d.avatar}
+              alt={d.author || ""}
+              width={56}
+              height={56}
+              className="rounded-full border-2 border-glass-3"
+            />
+          )}
+          <div className="flex-1 min-w-0">
+            {d.title && (
+              <TruncatedText
+                as="h2"
+                text={d.title}
+                className="text-lg font-semibold text-primary line-clamp-3 mb-1"
+              />
+            )}
+            {d.author && (
+              <TruncatedText
+                as="p"
+                text={d.author}
+                className="text-sm text-muted truncate"
+              />
+            )}
+          </div>
+        </div>
+      </Card>
+
+      {/* 作品信息：作者 / 作者ID / 内容类型 / 发布时间 */}
+      <ParseInfoPanel data={d} platform={effectivePlatform} title="作品信息" />
+
+      {/* 文案：视频信息与下载按钮之间，可一键复制 */}
+      {d.desc && <CaptionBox text={d.desc} title="文案" />}
+
+      {videoUrl && (
+        <VideoPosterCard
+          url={videoUrl}
+          cover={d.cover}
+          alt={d.title || "视频封面"}
+          accent="neutral"
+          tall
+          audioUrl={d.audioUrl}
+          qualities={d.qualities}
+        />
+      )}
+
+      {/* 图片/图集：不重复渲染 cover（cover 已是 images[0]），避免第一张图显示两次 */}
+      {isImage && images.length > 0 && (
+        <div className="space-y-3">
+          {images.length === 1 ? (
+            <a
+              href={images[0]}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block rounded-2xl overflow-hidden border border-border-subtle bg-black">
+              <ProxiedImage
+                src={images[0]}
+                alt=""
+                width={800}
+                height={800}
+                className="w-full h-auto object-contain max-h-[70vh]"
+              />
+            </a>
+          ) : (
+            <CollapsibleGallery>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {images.map((src, i) => (
+                  <a
+                    key={`${src}-${i}`}
+                    href={src}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="relative aspect-square rounded-lg overflow-hidden border border-border-subtle bg-black group">
+                    <ProxiedImage
+                      src={src}
+                      alt=""
+                      fill
+                      className="object-contain p-1 transition-transform duration-300 group-hover:scale-105"
+                    />
+                  </a>
+                ))}
+              </div>
+            </CollapsibleGallery>
+          )}
+        </div>
+      )}
+
+      {/* 纯文字内容（无媒体）：展示提示而非空白 */}
+      {isText && (
+        <Card className="p-6 text-center">
+          <p className="text-sm text-muted leading-relaxed">
+            该内容仅包含文字，无可下载的视频或图片
+          </p>
+        </Card>
+      )}
+
+    </div>
+  );
+}

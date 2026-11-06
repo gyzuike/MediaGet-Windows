@@ -1,0 +1,38 @@
+/* ============================================================
+   MusicExplorer · YesPlayMusic / Apple Music 风格（页面级作用域 .mp-app）
+   仅增强，不改动全站令牌；通过 --accent 覆盖实现主题化强调色
+   ============================================================
+
+   —— 本文件是样式入口（barrel），只做 @import 汇聚 ——
+
+   原 3714 行单文件已按功能分区拆成 8 个片段（同目录 music-*.css），
+   引用方仍只 import 本文件（src/app/music/page.tsx、settings/page.tsx、
+   settings/login/page.tsx），无需感知拆分。
+
+   ⚠️ 顺序即层叠顺序：CSS 同特异性下后者覆盖前者，因此 @import 的先后
+   不能调换，新增/移动规则时必须按其所属分区放入对应片段，而不是往本文件
+   直接追加。片段内部也有顺序依赖（如歌词页的「动态取色」「移动端」两段
+   是覆写其上方的基础规则）。
+
+   各片段职责见其文件头注释：
+     1. music-base.css          作用域与共享令牌、音质下拉、toast
+     2. music-list.css          发现歌曲 / 播放列表主体（左半区）
+     3. music-now-playing.css   右侧「正在播放」
+     4. music-player-bar.css    底部播放条（收起/唤起、进度、音量）
+     5. music-lyric-page.css    整页歌词页（含动态取色与移动端）
+     6. music-dialogs.css       详情弹窗 / 查找方式切换 / 选版面板 / 设置齿轮
+     7. music-settings-card.css 平台引擎设置共享卡片
+     8. music-settings-page.css 专用设置页与登录页页面态
+
+   注：本目录样式均为原生 CSS（不含 @tailwind / @apply / @layer），
+   因此拆分不依赖 postcss-import，交由构建链的 css-loader 内联即可。
+   ============================================================ */
+
+@import "./music-base.css";
+@import "./music-list.css";
+@import "./music-now-playing.css";
+@import "./music-player-bar.css";
+@import "./music-lyric-page.css";
+@import "./music-dialogs.css";
+@import "./music-settings-card.css";
+@import "./music-settings-page.css";

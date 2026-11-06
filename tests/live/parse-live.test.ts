@@ -1,0 +1,158 @@
+/**
+ * 真机解析：直连各平台上游，不使用 mock。
+ * 运行: npm run test:live
+ * 需先在 .env（或环境变量）中配置 tests/live/urls.example.env 所列全部 LIVE_URL_*。
+ */
+// @ts-nocheck
+import { describe, it, expect } from "vitest";
+import { GET as GETDouyin } from "@/app/api/douyin/route.js";
+import { GET as GETBilibili } from "@/app/api/bilibili/route.js";
+import { GET as GETKuaishou } from "@/app/api/kuaishou/route.js";
+import { GET as GETWeibo } from "@/app/api/weibo/route.js";
+import { GET as GETXhs } from "@/app/api/xhs/route.js";
+import { GET as GETQsmusic } from "@/app/api/qsmusic/route.js";
+import { GET as GETXigua } from "@/app/api/xigua/route.js";
+import { GET as GETZuiyou } from "@/app/api/zuiyou/route.js";
+import { GET as GETAcfun } from "@/app/api/acfun/route.js";
+import { GET as GETTwitter } from "@/app/api/twitter/route.js";
+import { GET as GETTiktok } from "@/app/api/tiktok/route.js";
+import { GET as GETInstagram } from "@/app/api/instagram/route.js";
+import { GET as GETYoutube } from "@/app/api/youtube/route.js";
+
+const RUN = process.env.RUN_LIVE_PARSE === "1";
+
+const LIVE_TIMEOUT = Number(process.env.LIVE_PARSE_TIMEOUT_MS || 120000);
+
+function req(path: string, shareUrl: string) {
+  return new Request(
+    `http://127.0.0.1${path}?url=${encodeURIComponent(shareUrl)}`,
+    {
+      headers: { "x-forwarded-for": "203.0.113.42" },
+    }
+  );
+}
+
+function expectSuccessCode(json: { code: number }) {
+  expect([200, 1]).toContain(json.code);
+}
+
+function expectPlayablePayload(id: string, json: Record<string, unknown>) {
+  expectSuccessCode(json);
+  const data = json.data as Record<string, unknown> | undefined;
+
+  if (id === "bilibili") {
+    expect(Array.isArray(data)).toBe(true);
+    expect((data as { video_url?: string }[])[0]?.video_url).toMatch(
+      /^https?:\/\//
+    );
+    return;
+  }
+
+  expect(data && typeof data === "object").toBe(true);
+  const d = data as Record<string, unknown>;
+
+  const directUrl =
+    (d.url as string) ||
+    (d.photoUrl as string) ||
+    (d.video as string) ||
+    (d.playurl_video as string);
+
+  const images = d.images as string[] | undefined;
+
+  if (directUrl) {
+    expect(directUrl).toMatch(/^https?:\/\//);
+    return;
+  }
+  if (Array.isArray(images) && images.length > 0) {
+    // web 出口已把图片直链改写成站内代理串（/api/image?url=...），内核直链由单测守卫
+    expect(images[0]).toMatch(/^(https?:\/\/|\/api\/image\?url=)/);
+    return;
+  }
+  // 纯文字动态（B站 WORD / 无图动态）：无媒体直链，正文在 desc
+  if (d.type === "text" && typeof d.desc === "string" && d.desc.trim()) {
+    return;
+  }
+
+  throw new Error(`${id}: 响应无可用播放/图片地址`);
+}
+
+const CASES = [
+  { id: "douyin", path: "/api/douyin", envKey: "LIVE_URL_DOUYIN", GET: GETDouyin },
+  {
+    id: "bilibili",
+    path: "/api/bilibili",
+    envKey: "LIVE_URL_BILIBILI",
+    GET: GETBilibili,
+  },
+  {
+    id: "bilibili-opus",
+    path: "/api/bilibili",
+    envKey: "LIVE_URL_BILIBILI_OPUS",
+    GET: GETBilibili,
+  },
+  {
+    id: "bilibili-opus-text",
+    path: "/api/bilibili",
+    envKey: "LIVE_URL_BILIBILI_OPUS_TEXT",
+    GET: GETBilibili,
+  },
+  {
+    id: "kuaishou",
+    path: "/api/kuaishou",
+    envKey: "LIVE_URL_KUAISHOU",
+    GET: GETKuaishou,
+  },
+  { id: "weibo", path: "/api/weibo", envKey: "LIVE_URL_WEIBO", GET: GETWeibo },
+  { id: "xhs", path: "/api/xhs", envKey: "LIVE_URL_XHS", GET: GETXhs },
+  {
+    id: "qsmusic",
+    path: "/api/qsmusic",
+    envKey: "LIVE_URL_QSMUSIC",
+    GET: GETQsmusic,
+  },
+  { id: "xigua", path: "/api/xigua", envKey: "LIVE_URL_XIGUA", GET: GETXigua },
+  { id: "zuiyou", path: "/api/zuiyou", envKey: "LIVE_URL_ZUIYOU", GET: GETZuiyou },
+  { id: "acfun", path: "/api/acfun", envKey: "LIVE_URL_ACFUN", GET: GETAcfun },
+  {
+    id: "twitter",
+    path: "/api/twitter",
+    envKey: "LIVE_URL_TWITTER",
+    GET: GETTwitter,
+  },
+  {
+    id: "tiktok",
+    path: "/api/tiktok",
+    envKey: "LIVE_URL_TIKTOK",
+    GET: GETTiktok,
+  },
+  {
+    id: "instagram",
+    path: "/api/instagram",
+    envKey: "LIVE_URL_INSTAGRAM",
+    GET: GETInstagram,
+  },
+  {
+    id: "youtube",
+    path: "/api/youtube",
+    envKey: "LIVE_URL_YOUTUBE",
+    GET: GETYoutube,
+  },
+] as const;
+
+describe.skipIf(!RUN)("真机解析（LIVE_URL_* 已配置，直连上游）", () => {
+  const configured = CASES.filter((c) => process.env[c.envKey]?.trim());
+
+  for (const { id, path, envKey, GET } of configured) {
+    it(id, async () => {
+      const shareUrl = process.env[envKey].trim();
+      const res = await GET(req(path, shareUrl));
+      const json = await res.json();
+      if (json.code !== 200 && json.code !== 1) {
+        throw new Error(
+          `[${id}] 解析失败 code=${json.code} msg=${json.msg}\nurl=${shareUrl}`
+        );
+      }
+      expectPlayablePayload(id, json);
+    }, LIVE_TIMEOUT);
+  }
+});

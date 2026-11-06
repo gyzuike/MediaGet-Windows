@@ -1,0 +1,595 @@
+"use client";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { ApiResponse } from "@/types/api";
+import {
+  VIDEO_PLATFORMS,
+  type VideoPlatformKey,
+} from "@/config/video-platforms";
+import {
+  extractUrlFromText as extractUrl,
+  detectPlatform,
+  hasValidVideoUrl,
+} from "@/utils/share";
+import { readableOnDark } from "@/utils/readable-color";
+import {
+  detectMusicZoneSongLink,
+  MUSIC_PLATFORM_LABEL,
+} from "@/lib/music-link";
+import PlatformIcon from "@/components/PlatformIcon";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  ClipboardPaste,
+  X,
+  Loader2,
+  Check,
+  Zap,
+  ScanSearch,
+} from "lucide-react";
+
+/**
+ * 识别不出视频平台时的文案：命中音乐区歌曲链接（含官方歌曲短链）则导向音乐解析页，
+ * 其余一律通用文案——已下线平台不在这里做专属黑名单。
+ */
+function unrecognizedHintFor(text: string): string {
+  const musicKey = detectMusicZoneSongLink(text);
+  if (musicKey) {
+    return `${MUSIC_PLATFORM_LABEL[musicKey]}歌曲请前往音乐解析页（/music）解析`;
+  }
+  return "无法识别的视频平台，请粘贴支持的平台链接（如抖音/快手/B站等）";
+}
+
+interface VideoParserFormProps {
+  /**
+   * data=成功结果 / null；errorMsg=错误文案；errorKind=失败细分类型
+   * （透传后端 ApiResponse.failType，如 YouTube 的 bot-gated / sources-down），
+   * 供父组件按失败形态渲染差异化提示。
+   */
+  onResult: (data: ApiResponse | null, errorMsg: string, errorKind?: string) => void;
+  setLoading: (loading: boolean) => void;
+  loading: boolean;
+  pickedPlatform?: VideoPlatformKey | "auto" | null;
+  pickNonce?: number;
+  onPlatformChange?: (platform: VideoPlatformKey | "auto") => void;
+}
+
+// 缓存：5 分钟有效，最多保留 20 条（LRU 粗略实现——写入时清最旧条目）
+// 纯 sessionStorage 操作，不依赖组件状态，放模块级避免重建
+const CACHE_TTL = 5 * 60 * 1000;
+const CACHE_MAX = 20;
+
+// 表单会话：切换页面/刷新后恢复输入与平台（不含冒号，避免被上方缓存 LRU 误删）
+const FORM_SESSION_KEY = "mediaGet-form-session";
+
+// 读取缓存：命中且未过期返回数据，否则删除过期项
+function readCache(cacheKey: string): ApiResponse | null {
+  const raw = sessionStorage.getItem(cacheKey);
+  if (!raw) return null;
+  try {
+    const parsed: { data: ApiResponse; timestamp: number } = JSON.parse(raw);
+    if (Date.now() - parsed.timestamp < CACHE_TTL) {
+      return parsed.data;
+    }
+    // 过期：立即删除，避免堆积
+    sessionStorage.removeItem(cacheKey);
+  } catch {
+    // 损坏的缓存条目：删除
+    sessionStorage.removeItem(cacheKey);
+  }
+  return null;
+}
+
+// 写入缓存：try/catch 防止 QuotaExceededError 中断流程；超限时清最旧条目
+function writeCache(cacheKey: string, data: ApiResponse) {
+  try {
+    // 粗略 LRU：达到上限时删除时间戳最旧的一条
+    if (sessionStorage.length >= CACHE_MAX) {
+      let oldestKey: string | null = null;
+      let oldestTime = Infinity;
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (!key || !key.includes(":")) continue;
+        try {
+          const v = JSON.parse(sessionStorage.getItem(key) || "{}");
+          if (typeof v.timestamp === "number" && v.timestamp < oldestTime) {
+            oldestTime = v.timestamp;
+            oldestKey = key;
+          }
+        } catch {
+          // 非缓存条目，跳过
+        }
+      }
+      if (oldestKey) sessionStorage.removeItem(oldestKey);
+    }
+    sessionStorage.setItem(
+      cacheKey,
+      JSON.stringify({ data, timestamp: Date.now() })
+    );
+  } catch {
+    // 配额满或不可写：静默失败，不影响解析主流程
+  }
+}
+
+export default function VideoParserForm({
+  onResult,
+  setLoading,
+  loading,
+  pickedPlatform,
+  pickNonce = 0,
+  onPlatformChange,
+}: VideoParserFormProps) {
+  const [input, setInput] = useState("");
+  const [url, setUrl] = useState("");
+  const [platform, setPlatform] = useState<VideoPlatformKey | "auto">("auto");
+  const [detectedPlatform, setDetectedPlatform] =
+    useState<VideoPlatformKey | null>(null);
+  // 是否已解析成功：成功后按钮禁用显示「已解析」，避免重复点击；输入变化时重置
+  const [hasResult, setHasResult] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  // 是否已从会话中恢复过历史输入（用于跳过自动读剪贴板，避免覆盖上次会话）
+  const restoredRef = useRef(false);
+
+  // 请求生命周期管理：避免重复请求、卸载后仍执行
+  const abortRef = useRef<AbortController | null>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 取消所有进行中的请求与定时器（切换解析 / 卸载时调用）
+  const cancelPending = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
+  // 组件卸载时清理所有挂起的请求与定时器
+  useEffect(() => {
+    return () => cancelPending();
+  }, [cancelPending]);
+
+  // 解析函数（带缓存、重试、可取消）
+  const parseVideo = useCallback(
+    async (url: string, platform: string, retryCount = 0) => {
+      if (!url) return;
+
+      const cacheKey = `${platform}:${url}`;
+
+      // 命中缓存：直接返回，不发请求
+      const cached = readCache(cacheKey);
+      if (cached) {
+        onResult(cached, "");
+        setHasResult(true);
+        return;
+      }
+
+      // 取消上一次进行中的请求，确保同一时刻只有一个解析
+      if (abortRef.current) abortRef.current.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setLoading(true);
+      onResult(null, "");
+
+      try {
+        // 统一走 /api/parse 单入口：平台识别、限流、黑名单、字段归一化都在出口层完成，
+        // 前端无需再按平台 key 拼独立路由（/api/douyin 等仍保留供外部直接调用）。
+        const response = await fetch(
+          `/api/parse?url=${encodeURIComponent(url)}`,
+          { signal: controller.signal }
+        );
+        const data: ApiResponse = await response.json();
+
+        // 请求已被取消（用户切换了新解析），丢弃结果
+        if (controller.signal.aborted) return;
+
+        if (data.code === 1 || data.code === 200) {
+          // 统一入口返回的 platform 是后端 key（如 redbook），
+          // 覆盖为前端 key（xhs），保证渲染注册表按前端 key 命中。
+          data.platform = platform as VideoPlatformKey;
+          onResult(data, "");
+          setHasResult(true);
+          writeCache(cacheKey, data);
+        } else {
+          onResult(null, data.msg || "解析失败", data.failType || "");
+        }
+      } catch (err) {
+        // 主动取消不算失败，静默处理
+        if (
+          controller.signal.aborted ||
+          (err instanceof DOMException && err.name === "AbortError")
+        ) {
+          return;
+        }
+        // 网络失败：重试一次
+        if (retryCount < 1) {
+          retryTimerRef.current = setTimeout(
+            () => parseVideo(url, platform, retryCount + 1),
+            1000
+          );
+          return;
+        }
+        onResult(null, "请求失败，请稍后重试");
+      } finally {
+        // 仅当这是当前活跃的请求时才清 loading
+        if (abortRef.current === controller) {
+          setLoading(false);
+          abortRef.current = null;
+        }
+      }
+    },
+    [onResult, setLoading]
+  );
+
+  // 防抖解析：每次先清掉前一个定时器，避免连续输入触发多次请求
+  const debouncedParse = useCallback(
+    (url: string, platform: string) => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      debounceTimerRef.current = setTimeout(
+        () => parseVideo(url, platform),
+        500
+      );
+    },
+    [parseVideo]
+  );
+
+  // Process input and detect platform
+  // immediate=true 时直接发起解析（粘贴场景），否则走 500ms 防抖（手动输入场景）
+  const processInputText = useCallback(
+    (text: string, immediate = false) => {
+      const extractedUrl = extractUrl(text);
+      if (extractedUrl) {
+        const detected = detectPlatform(text);
+        setDetectedPlatform(detected);
+        // 识别不到平台：提示用户链接不对，不发起解析
+        // （去掉兜底 douyin 后，任意 URL 不再被默认当抖音解析）
+        if (!detected) {
+          // 清掉可能残留的 url，避免用户点「开始解析」时用旧链接误发请求
+          setUrl("");
+          setPlatform("auto");
+          onPlatformChange?.("auto");
+          onResult(null, unrecognizedHintFor(text));
+          return;
+        }
+        setUrl(extractedUrl);
+        setPlatform(detected);
+        onPlatformChange?.(detected);
+        if (immediate) {
+          // 立即解析：清掉挂起的防抖定时器，直接发起请求
+          if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+          }
+          parseVideo(extractedUrl, detected);
+        } else {
+          debouncedParse(extractedUrl, detected);
+        }
+      } else {
+        setDetectedPlatform(null);
+      }
+    },
+    [debouncedParse, parseVideo, onResult, onPlatformChange]
+  );
+
+  // 挂载时恢复上次会话（同标签页切页返回 / 刷新后还原输入与平台；仅还原状态，不触发解析）
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(FORM_SESSION_KEY);
+      if (!raw) return;
+      const saved: {
+        input?: string;
+        url?: string;
+        platform?: VideoPlatformKey | "auto";
+        detectedPlatform?: VideoPlatformKey | null;
+        hasResult?: boolean;
+      } = JSON.parse(raw);
+      if (saved.input) {
+        restoredRef.current = true;
+        setInput(saved.input);
+        if (saved.url) setUrl(saved.url);
+        if (saved.platform) setPlatform(saved.platform);
+        if (saved.detectedPlatform) setDetectedPlatform(saved.detectedPlatform);
+        if (saved.hasResult) setHasResult(true);
+      }
+    } catch {
+      // 损坏的会话数据：忽略，保持空白表单
+    }
+  }, []);
+
+  // 输入 / 平台 / 解析状态变化时同步会话；全部清空时移除键
+  useEffect(() => {
+    try {
+      if (!input && !url && platform === "auto" && !detectedPlatform && !hasResult) {
+        sessionStorage.removeItem(FORM_SESSION_KEY);
+      } else {
+        sessionStorage.setItem(
+          FORM_SESSION_KEY,
+          JSON.stringify({ input, url, platform, detectedPlatform, hasResult })
+        );
+      }
+    } catch {
+      // 配额满或不可写：静默失败，不影响解析主流程
+    }
+  }, [input, url, platform, detectedPlatform, hasResult]);
+
+  // Auto-read clipboard on mount（已有历史会话时跳过，避免覆盖上次输入）
+  const hasAutoReadRef = useRef(false);
+  useEffect(() => {
+    if (hasAutoReadRef.current) return;
+    hasAutoReadRef.current = true;
+    if (restoredRef.current) return;
+
+    const autoReadClipboard = async () => {
+      try {
+        // 检查clipboard API是否可用（要求安全上下文 HTTPS）
+        if (typeof navigator === 'undefined' ||
+            !navigator.clipboard ||
+            typeof navigator.clipboard.readText !== 'function') {
+          return;
+        }
+
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim() && hasValidVideoUrl(text)) {
+          setInput(text);
+          processInputText(text);
+        }
+      } catch {
+        // 静默失败，不显示错误（权限问题或非安全上下文）
+        // 用户仍可手动粘贴
+      }
+    };
+
+    const timer = setTimeout(autoReadClipboard, 500);
+    return () => clearTimeout(timer);
+  }, [processInputText]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const text = e.target.value;
+    setInput(text);
+    // 内容变化：重置已解析状态，允许重新解析
+    setHasResult(false);
+    processInputText(text);
+  };
+
+  // 粘贴时立即解析（不走防抖），避免粘贴后还要等 500ms 才转圈
+  const handlePasteEvent = () => {
+    // 让浏览器先完成默认粘贴，再读取最终值
+    setTimeout(() => {
+      const text = textareaRef.current?.value ?? "";
+      if (!text) return;
+      setInput(text);
+      // 内容变化：重置已解析状态，允许重新解析
+      setHasResult(false);
+      processInputText(text, true);
+    }, 0);
+  };
+
+  const handlePaste = async () => {
+    try {
+      // 检查clipboard API是否可用
+      if (typeof navigator === 'undefined' ||
+          !navigator.clipboard ||
+          typeof navigator.clipboard.readText !== 'function') {
+        onResult(null, "您的浏览器不支持自动粘贴，请手动粘贴（Ctrl+V）");
+        return;
+      }
+
+      const text = await navigator.clipboard.readText();
+      setInput(text);
+      processInputText(text, true);
+    } catch {
+      onResult(null, "粘贴失败：请检查浏览器权限或使用手动粘贴（Ctrl+V）");
+    }
+  };
+
+  const handleClear = () => {
+    cancelPending();
+    setInput("");
+    setUrl("");
+    setDetectedPlatform(null);
+    setPlatform("auto");
+    setHasResult(false);
+    onPlatformChange?.("auto");
+    onResult(null, "");
+    textareaRef.current?.focus();
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!url) {
+      onResult(null, "请粘贴包含视频链接的文本");
+      return;
+    }
+    // 链接不属于任何受支持平台：提示用户，不发起解析
+    const detected = detectPlatform(url);
+    if (!detected) {
+      onResult(null, unrecognizedHintFor(url));
+      return;
+    }
+    // 手动指定平台时做一致性校验，避免把抖音链接发给 B 站接口等错配请求；
+    // 「自动识别」模式下直接用检测结果
+    const target = platform === "auto" ? detected : platform;
+    if (detected !== target) {
+      onResult(
+        null,
+        `链接属于${VIDEO_PLATFORMS[detected].name}，与当前所选平台不一致，已拒绝解析`
+      );
+      return;
+    }
+    // 复用 parseVideo，避免重复实现 fetch + 缓存逻辑
+    parseVideo(url, target);
+  };
+
+  // 注入平台强调色：品牌色原样给浅色主题，另给一份深色主题用的可读版本。
+  // 两个变量都由 CSS 按主题挑选——不能直接写 --accent，内联值会压过 .dark 规则，
+  // 近黑品牌色（X/TikTok）在深色下就成了看不见的文字；近黑平台自带 darkColor
+  // 时优先用它（X 的链接蓝 / TikTok 的青），再兜底提亮。
+  useEffect(() => {
+    const cfg = detectedPlatform
+      ? VIDEO_PLATFORMS[detectedPlatform]
+      : undefined;
+    if (!cfg) return;
+    const darkAccent = "darkColor" in cfg ? cfg.darkColor : cfg.color;
+    const root = document.documentElement.style;
+    root.setProperty("--accent-brand", cfg.color);
+    root.setProperty("--accent-readable", readableOnDark(darkAccent));
+  }, [detectedPlatform]);
+
+  // 平台 chip 点击：选中平台（含「自动识别」）、聚焦输入框；若输入框已有链接且匹配则直接解析
+  useEffect(() => {
+    if (pickedPlatform === undefined || pickedPlatform === null) return;
+    setPlatform(pickedPlatform);
+    onPlatformChange?.(pickedPlatform);
+    const el = textareaRef.current;
+    if (el) {
+      el.focus();
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (url) {
+      const detected = detectPlatform(url);
+      if (detected && detected === pickedPlatform) {
+        parseVideo(url, detected);
+      } else if (detected) {
+        onResult(
+          null,
+          `链接属于${VIDEO_PLATFORMS[detected].name}，与所选平台不一致，请选择「自动识别」或${VIDEO_PLATFORMS[detected].name}`
+        );
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickNonce]);
+
+  return (
+    <div className="mx-auto max-w-3xl">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Input Card */}
+        <div className="rounded-2xl border border-border-subtle bg-glass-1 p-4 shadow-card backdrop-blur sm:p-5">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="video-input">
+              <svg
+                className="h-4 w-4 text-accent"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}>
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                />
+              </svg>
+              视频链接或分享文本
+            </Label>
+
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={handlePaste}>
+                <ClipboardPaste />
+                粘贴
+              </Button>
+
+              {input && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  className="hover:text-error hover:bg-error/10"
+                  onClick={handleClear}>
+                  <X />
+                  清空
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {/* Textarea */}
+          <textarea
+            id="video-input"
+            ref={textareaRef}
+            value={input}
+            onChange={handleInputChange}
+            onPaste={handlePasteEvent}
+            placeholder="粘贴视频分享链接或完整分享文案，自动识别平台并解析…"
+            className="input-glow mt-3 min-h-[130px] w-full resize-none rounded-2xl border border-border-medium bg-glass-2 px-4 py-3.5 text-sm text-foreground transition-colors placeholder:text-muted focus:border-accent focus:bg-glass-3 focus:outline-none"
+          />
+        </div>
+
+        {/* Platform & Submit Row */}
+        <div className="rounded-2xl border border-border-subtle bg-glass-1 p-4 shadow-card backdrop-blur sm:p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            {/* Current Platform Indicator */}
+            <div className="flex-1">
+              <label className="mb-1.5 block text-xs text-muted">
+                当前平台
+              </label>
+              <div className="flex h-10 items-center gap-2.5 rounded-xl border border-border-medium bg-glass-2 px-3.5 text-sm text-foreground">
+                {platform === "auto" ? (
+                  <>
+                    <ScanSearch className="h-4 w-4 shrink-0 text-accent" />
+                    <span className="truncate">自动识别</span>
+                  </>
+                ) : (
+                  <>
+                    <PlatformIcon platform={platform} size={18} />
+                    <span className="truncate">
+                      {VIDEO_PLATFORMS[platform].name}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlatform("auto");
+                        onPlatformChange?.("auto");
+                      }}
+                      className="ml-auto shrink-0 text-xs text-accent hover:underline">
+                      恢复自动识别
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Submit Button */}
+            <div className="sm:flex-[1.2]">
+              <Button
+                ref={buttonRef}
+                type="submit"
+                disabled={loading || !url || hasResult}
+                className="w-full">
+                {loading ? (
+                  <>
+                    <Loader2 className="animate-spin" />
+                    解析中...
+                  </>
+                ) : hasResult ? (
+                  <>
+                    <Check />
+                    已解析
+                  </>
+                ) : (
+                  <>
+                    <Zap />
+                    开始解析
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+
+        </div>
+      </form>
+    </div>
+  );
+}

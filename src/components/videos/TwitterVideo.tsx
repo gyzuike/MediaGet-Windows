@@ -1,0 +1,340 @@
+"use client";
+import { useState } from "react";
+import ProxiedImage from "@/components/ui/ProxiedImage";
+import { ApiResponse, ParseData } from "@/types/api";
+import { formatCount } from "@/lib/format";
+import { scrollToElement } from "@/lib/dom";
+import VideoPosterCard from "./VideoPosterCard";
+import ParseInfoPanel from "./ParseInfoPanel";
+import CaptionBox from "./CaptionBox";
+import CollapsibleGallery from "./CollapsibleGallery";
+import { sanitizeFilename } from "@/utils/filename";
+import { Download, Loader2 } from "lucide-react";
+import {
+  GalleryDownloadBar,
+  SelectableImageLink,
+  useGallerySelection,
+} from "./GalleryMultiSelect";
+import DownloadRow from "./DownloadRow";
+import PlatformIcon from "@/components/PlatformIcon";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import TruncatedText from "@/components/ui/truncated-text";
+
+/**
+ * X (Twitter) 结果卡片 —— 结构对齐微博标准：
+ * 博主信息卡 → 视频（多P切换/下载）→ 图集 → 推文（可复制）→ 作品信息面板。
+ * 多视频推文（最多 4 个媒体）由后端解析为 videos 列表，播放卡内分P切换，
+ * 下载区逐P列出（对齐 B 站/微博心智）；视频+图片混合推文两者叠加展示。
+ */
+interface TwitterVideoProps {
+  data: ApiResponse;
+}
+
+export default function TwitterVideo({ data }: TwitterVideoProps) {
+  const [imageLoading, setImageLoading] = useState(true);
+  // 一键下载全部分P视频：触发期间禁用按钮防重复
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  // 图集多选状态（图文 N 张图；张数随解析结果变化时自动清理越界勾选）
+  const gallerySel = useGallerySelection(
+    (data.data as ParseData | undefined)?.images?.filter(Boolean).length ?? 0
+  );
+
+  if (!data.data) {
+    return null;
+  }
+
+  const d = data.data as ParseData;
+  const images = d.images?.filter(Boolean) || [];
+  // 多视频：后端把多视频推文各视频直链解析为 videos，播放卡片内分P切换；
+  // 单视频/图集时无此字段，仍走 url / images。
+  const videos = (d.videos || []).filter((v) => v && v.url);
+  const hasMultiVideo = videos.length > 1;
+  // 媒体渲染与 type 解耦：有视频直链就渲染视频，有图片就渲染图集，两者可叠加
+  const hasVideo = !!d.url && d.type !== "image";
+  const hasImages = images.length > 0;
+
+
+  // 下载文件名：twitter-作者-标题.mp4（走代理强制保存；标题 30 字，净化后拼接）
+  const downloadName = `twitter-${sanitizeFilename(
+    d.author || "video",
+    20
+  )}-${sanitizeFilename(d.title || "video", 30)}.mp4`;
+
+  // 多分P下载文件名：twitter-作者-P{序号}-标题.mp4（带P序号，逐P下载不冲突）
+  const buildDownloadName = (index: number): string =>
+    `twitter-${sanitizeFilename(d.author || "video", 20)}-P${
+      index + 1
+    }-${sanitizeFilename(d.title || "video", 30)}.mp4`;
+
+  // 播放卡「下载」按钮：多P时滚动定位到下方「下载选项」列表中对应分P的下载行
+  const scrollToDownload = (index: number) =>
+    scrollToElement(`twitter-download-${index}`);
+
+  // 一键下载全部分P：逐个触发视频代理下载（同源 URL + Content-Disposition 强制保存），
+  // 间隔 600ms 避免浏览器把连续下载当批量行为拦截
+  const handleDownloadAllVideos = () => {
+    if (downloadingAll || videos.length === 0) return;
+    setDownloadingAll(true);
+    videos.forEach((item, index) => {
+      setTimeout(() => {
+        const url = `/api/video-proxy?url=${encodeURIComponent(
+          item.url
+        )}&download=1&filename=${encodeURIComponent(buildDownloadName(index))}`;
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }, index * 600);
+    });
+    setTimeout(() => setDownloadingAll(false), videos.length * 600);
+  };
+
+  return (
+    <div className="space-y-5" style={{ touchAction: "pan-y" }}>
+      {/* 博主信息卡：头像 + 昵称 + 用户ID */}
+      {(d.avatar || d.author) && (
+        <Card className="p-5">
+          <div className="flex items-center gap-4">
+            {d.avatar && (
+              <ProxiedImage
+                src={d.avatar}
+                alt={d.author || ""}
+                width={56}
+                height={56}
+                className="rounded-full border-2 border-glass-3"
+              />
+            )}
+            <div className="flex-1 min-w-0">
+              {d.author && (
+                <div className="flex items-center gap-2">
+                  <span className="flex-shrink-0 text-[13px] text-secondary">作者</span>
+                  {d.authorUrl ? (
+                    <TruncatedText
+                      as="a"
+                      text={d.author}
+                      href={d.authorUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[13px] font-medium text-accent truncate hover:underline hover:text-accent/80 transition-colors"
+                    />
+                  ) : (
+                    <TruncatedText
+                      text={d.author}
+                      className="text-[13px] font-medium text-accent truncate"
+                    />
+                  )}
+                </div>
+              )}
+              {d.authorId && (
+                <TruncatedText
+                  as="p"
+                  text={`用户名：${d.authorId}`}
+                  className="mt-0.5 text-[13px] text-muted truncate"
+                />
+              )}
+              {d.sign && (
+                <p className="mt-0.5 flex items-start gap-1 text-[13px] text-muted">
+                  <span className="flex-shrink-0">简介：</span>
+                  <TruncatedText
+                    text={d.sign}
+                    className="min-w-0 truncate"
+                  />
+                </p>
+              )}
+              {(d.followingCount != null && d.followingCount > 0) ||
+              (d.followerCount != null && d.followerCount > 0) ? (
+                <p className="mt-0.5 flex items-center gap-4 text-[13px] text-muted">
+                  {d.followingCount != null && d.followingCount > 0 && (
+                    <span className="inline-flex items-baseline gap-1">
+                      <span>关注：</span>
+                      <span className="font-semibold text-primary">
+                        {formatCount(d.followingCount)}
+                      </span>
+                    </span>
+                  )}
+                  {d.followerCount != null && d.followerCount > 0 && (
+                    <span className="inline-flex items-baseline gap-1">
+                      <span>粉丝：</span>
+                      <span className="font-semibold text-primary">
+                        {formatCount(d.followerCount)}
+                      </span>
+                    </span>
+                  )}
+                </p>
+              ) : null}
+            </div>
+            <div className="flex-shrink-0">
+              <PlatformIcon platform="twitter" size={40} rounded="rounded-xl" />
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* 视频：封面 + 播放/下载。多视频推文：分P切换条在播放卡片内，
+          下载按钮多P时滚动定位到下方「下载选项」列表（与B站/微博一致） */}
+      {hasVideo && (
+        <VideoPosterCard
+          url={d.url!}
+          cover={d.cover}
+          alt={d.title || "视频封面"}
+          title={d.title}
+          author={d.author}
+          platform="twitter"
+          accent="neutral"
+          inline
+          parts={hasMultiVideo ? videos : undefined}
+          qualities={d.qualities}
+          downloadName={downloadName}
+          downloadText={hasMultiVideo ? "下载视频" : undefined}
+          onDownloadClick={hasMultiVideo ? scrollToDownload : undefined}
+        />
+      )}
+
+      {/* 图集：单图大图展示，多图网格；视频+图片混合时与视频叠加展示 */}
+      {hasImages && (
+        <Card className="p-3">
+          {images.length === 1 ? (
+            <a
+              href={images[0]}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="relative block aspect-square rounded-xl overflow-hidden bg-black">
+              {imageLoading && (
+                <div className="absolute inset-0 bg-glass-2 animate-pulse" />
+              )}
+              <ProxiedImage
+                src={images[0]}
+                alt={d.title || "图片"}
+                fill
+                sizes="(max-width: 800px) 100vw, 800px"
+                className="object-cover"
+                priority
+                onLoad={() => setImageLoading(false)}
+              />
+            </a>
+          ) : (
+            <CollapsibleGallery>
+              <div
+                className={`grid gap-2 ${
+                  images.length === 2
+                    ? "grid-cols-2"
+                    : images.length === 3
+                    ? "grid-cols-3"
+                    : images.length === 4
+                    ? "grid-cols-2"
+                    : "grid-cols-3"
+                }`}>
+                {images.map((imageUrl, index) => (
+                  <SelectableImageLink
+                    key={index}
+                    href={imageUrl}
+                    accent="#1d9bf0"
+                    selecting={gallerySel.selecting}
+                    selected={gallerySel.isSelected(index)}
+                    onToggle={() => gallerySel.toggle(index)}
+                    className="relative aspect-square rounded-xl overflow-hidden group block bg-black">
+                    <ProxiedImage
+                      src={imageUrl}
+                      alt={`${d.title || "图片"} ${index + 1}`}
+                      fill
+                      sizes="(max-width: 800px) 50vw, 400px"
+                      className="object-cover transition-transform duration-500 group-hover:scale-105"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                  </SelectableImageLink>
+                ))}
+              </div>
+            </CollapsibleGallery>
+          )}
+
+          {/* 图集下载：选图多选下载 / 一键下载全部（多选文件名保留原图序） */}
+          <GalleryDownloadBar
+            urls={images}
+            baseName={`twitter-${d.author || "图片"}`}
+            gradient="bg-gradient-to-r from-[#14171a] to-[#657786] hover:opacity-90"
+            selection={gallerySel}
+          />
+        </Card>
+      )}
+
+      {/* 推文文案：媒体下方，可一键复制 */}
+      {(d.desc || d.title) && (
+        <CaptionBox text={(d.desc || d.title)!} title="推文" />
+      )}
+
+      {/* 作品信息：发布时间 / 时长 / 类型（博主卡已展示作者信息） */}
+      <ParseInfoPanel platform="twitter" data={d} title="推文信息" />
+
+      {/* 多P下载选项：分P逐条列出，每条一个下载按钮。
+          多档位视频每P行内显示清晰度下拉，单档保持 MP4 徽标。
+          文件名带P序号，逐P下载互不覆盖 */}
+      {hasVideo && hasMultiVideo && (
+        <Card id="twitter-download" className="p-5 scroll-mt-24">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-primary flex items-center gap-2">
+              <svg
+                className="w-4 h-4 text-accent"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}>
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                />
+              </svg>
+              下载选项 ({videos.length})
+            </h3>
+            {/* 一键下载全部：逐个触发下载，浏览器若提示「允许多次下载」需用户确认一次 */}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={handleDownloadAllVideos}
+              disabled={downloadingAll}
+              className="flex-shrink-0">
+              {downloadingAll ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在触发...
+                </>
+              ) : (
+                <>
+                  <Download className="h-4 w-4" />
+                  一键下载全部
+                </>
+              )}
+            </Button>
+          </div>
+
+          <div className="space-y-3">
+            {videos.map((item, index) => (
+              <DownloadRow
+                key={index}
+                id={`twitter-download-${index}`}
+                cover={item.cover}
+                coverAlt={item.title || `视频 ${index + 1}`}
+                title={`P${index + 1}: ${item.title || d.title || "视频"}`}
+                durationText={item.durationFormat}
+                badge="MP4"
+                href={item.url}
+                qualities={item.qualities}
+                buildHref={(url) =>
+                  `/api/video-proxy?url=${encodeURIComponent(
+                    url
+                  )}&download=1&filename=${encodeURIComponent(
+                    buildDownloadName(index)
+                  )}`}
+                gradient="from-[#14171a] to-[#657786]"
+              />
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}

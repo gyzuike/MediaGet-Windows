@@ -1,0 +1,137 @@
+import type { Metadata, Viewport } from "next";
+import "./globals.css";
+import RootExtras from "@/components/RootExtras";
+import SiteHeader from "@/components/SiteHeader";
+import { siteConfig } from "@/config/site";
+
+export const metadata: Metadata = {
+  metadataBase: new URL(siteConfig.url),
+  title: {
+    default: `${siteConfig.name} - 短视频解析下载工具`,
+    template: `%s - ${siteConfig.name}`,
+  },
+  description:
+    "在线免费短视频解析工具，支持抖音、快手、B站、微博、小红书、西瓜、TikTok、X、Instagram、YouTube 等 20+ 平台，粘贴链接即得无水印视频下载地址，无需安装、即贴即用。",
+  keywords: [
+    "视频解析",
+    "短视频解析",
+    "视频下载",
+    "无水印视频下载",
+    "去水印",
+    "视频去水印",
+    "抖音解析",
+    "抖音去水印",
+    "抖音视频下载",
+    "快手解析",
+    "快手去水印",
+    "B站解析",
+    "bilibili解析",
+    "微博解析",
+    "微博视频下载",
+    "小红书解析",
+    "小红书视频下载",
+    "西瓜视频解析",
+    "AcFun解析",
+    "TikTok解析",
+    "X视频解析",
+    "Twitter解析",
+    "Instagram解析",
+    "YouTube解析",
+    "视频解析工具",
+    "免费视频解析",
+    "在线视频解析",
+    siteConfig.name,
+  ],
+  manifest: "/manifest.webmanifest",
+  authors: [{ name: siteConfig.domain }],
+  openGraph: {
+    title: `${siteConfig.name} - 短视频解析下载工具`,
+    description:
+      "免费在线短视频解析，支持抖音、快手、B站、微博、小红书、西瓜、TikTok、X、Instagram、YouTube 等 20+ 平台，粘贴链接即得无水印视频下载地址。",
+    url: siteConfig.url,
+    siteName: siteConfig.name,
+    type: "website",
+    locale: "zh_CN",
+    images: [
+      { url: "/og-image.png", width: 1200, height: 630, alt: `${siteConfig.name} 短视频解析` },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `${siteConfig.name} - 短视频解析下载工具`,
+    description:
+      "免费在线短视频解析，支持抖音、快手、B站、微博、小红书、西瓜、TikTok、X、Instagram、YouTube 等 20+ 平台，粘贴链接即得无水印视频下载地址。",
+    images: ["/og-image.png"],
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true },
+  },
+  alternates: {
+    canonical: siteConfig.url,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0b0b14",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="zh-CN" className="scroll-smooth" suppressHydrationWarning>
+      <head>
+        {/* 主题初始化：body 渲染前同步挂载 class，避免闪烁（FOUC）
+            主题三态：light / dark / system（跟随设备，默认）
+            存储值缺省或为 system 时，跟随系统偏好并监听其变化实时切换
+            脚本内两处 catch 为有意静默：隐私模式下 localStorage 与 matchMedia
+            都可能直接抛异常，此处只能静默回退 system，无条件打日志 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){function mode(){try{var t=localStorage.getItem("theme");return t==="light"||t==="dark"||t==="system"?t:"system";}catch(e){return "system";}}function apply(){var m=mode();var d=m==="dark"||(m==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);var el=document.documentElement;el.classList.remove("dark","light");el.classList.add(d?"dark":"light");}apply();try{window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",apply);}catch(e){}})();`,
+          }}
+        />
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+        />
+        <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "WebApplication",
+              name: siteConfig.name,
+              url: siteConfig.url,
+              applicationCategory: "UtilityApplication",
+              operatingSystem: "Any",
+              description:
+                "免费在线短视频解析工具，支持抖音、快手、B站、微博、小红书、西瓜、TikTok、X、Instagram、YouTube 等 20+ 平台，粘贴链接即得无水印视频下载地址。",
+              inLanguage: "zh-CN",
+              offers: { "@type": "Offer", price: "0", priceCurrency: "CNY" },
+            }),
+          }}
+        />
+      </head>
+      <body className="antialiased min-h-screen flex flex-col noise-overlay">
+        {/* 全站 AI 感网格背景层 */}
+        <div className="aurora-grid" aria-hidden="true" />
+        <div className="relative flex min-h-screen flex-1 flex-col" style={{ zIndex: 1 }}>
+          <SiteHeader />
+          <main className="flex-1">{children}</main>
+          {/* 回到顶部 + 页脚：沉浸式页面（/music）中由 RootExtras 自行隐藏 */}
+          <RootExtras />
+        </div>
+      </body>
+    </html>
+  );
+}

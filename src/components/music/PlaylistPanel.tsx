@@ -1,0 +1,258 @@
+"use client";
+
+import type { RefObject } from "react";
+import { AlertCircle, Disc3, Loader2, Play, Search } from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  musicLineMeta,
+  type DirectData,
+  type SearchItem,
+} from "@/lib/client/music-client";
+import type { SearchSourceKey } from "@/types/music";
+import { PlatformIcon } from "@/components/music/platform-icons";
+import { sourceMetaFor, type SearchChip } from "./source-meta";
+import { EqBars } from "./EqBars";
+import FavoriteButton from "./FavoriteButton";
+
+export interface PlaylistPanelProps {
+  /** 挂载期本地恢复（播放列表快照）是否尚未落定：true 时先显示占位，避免刷新后
+   *  （SSR 首帧拿不到 localStorage）先闪一下「播放列表还是空的」再出列表 */
+  restoring: boolean;
+  searching: boolean;
+  searchedKw: string;
+  list: SearchItem[] | null;
+  currentIndex: number | null;
+  /** 首次取直链的加载中状态（已有 direct 时切音质不清空，避免动效闪烁） */
+  fetching: boolean;
+  direct: DirectData | null;
+  playing: boolean;
+  paging: boolean;
+  pageErr: string;
+  hasMore: boolean;
+  source: SearchSourceKey;
+  sourceChips: SearchChip[];
+  listTopRef: RefObject<HTMLDivElement | null>;
+  artistText: (item: SearchItem) => string;
+  playTrack: (item: SearchItem, index: number) => void;
+  handleListScroll: () => void;
+  /** 聚合搜索模式（展示态/空态文案差异化） */
+  aggMode?: boolean;
+  /**
+   * 上一次搜索 / 请求失败的原因：非空则渲染失败态，**优先于「未搜索」与「无结果」两个空态**。
+   * ⚠️ 为什么必须优先：搜索请求一开始就切到了本视图，失败时列表仍是 `null`，
+   * 让空态先渲染的话，失败原因会被「播放列表还是空的」彻底盖住——用户只当是没搜过，
+   * 既不知道失败了、也不知道为什么。错误文案挂在搜索面板上也没用：本视图已把面板换掉了。
+   */
+  errorHint?: string;
+  /** 行内收藏按钮动作完成回调（父层弹轻提示）；不传则静默 */
+  onFavoriteToggled?: (result: { added: boolean; persistFailed: boolean }) => void;
+}
+
+/**
+ * 播放列表结果：加载 / 空态 / 无结果三态提示 + 表头 + 可下拉触底翻页的行列表。
+ * 行内展示序号、播放动效、歌手 / 专辑 / 平台 / 线路信息，点击或回车播放。
+ */
+export default function PlaylistPanel({
+  restoring,
+  searching,
+  searchedKw,
+  list,
+  currentIndex,
+  fetching,
+  direct,
+  playing,
+  paging,
+  pageErr,
+  hasMore,
+  source,
+  sourceChips,
+  listTopRef,
+  artistText,
+  playTrack,
+  handleListScroll,
+  aggMode = false,
+  errorHint = "",
+  onFavoriteToggled,
+}: PlaylistPanelProps) {
+  if (searching) {
+    return (
+      <div className="mp-scroll">
+        <div className="mp-state">
+          <Loader2 className="mp-spin" />
+          <p>
+            {aggMode
+              ? `正在聚合搜索多个音源「${searchedKw}」…`
+              : `正在搜索「${searchedKw}」…`}
+          </p>
+        </div>
+      </div>
+    );
+  }
+  // 恢复中优先于空态：刷新时首帧还没有本地快照（localStorage 只在客户端可读），
+  // 直接展示「播放列表还是空的」会先闪一下空文案再被真实列表顶掉
+  if (restoring) {
+    return (
+      <div className="mp-scroll">
+        <div className="mp-state">
+          <Loader2 className="mp-spin" />
+          <p>正在恢复上次的播放列表…</p>
+        </div>
+      </div>
+    );
+  }
+  // 失败态优先于两个空态（理由见 errorHint 注释）：失败时 list 仍是 null，
+  // 「播放列表还是空的」会把失败原因整个盖掉
+  if (errorHint) {
+    return (
+      <div className="mp-scroll">
+        <div className="mp-state">
+          <AlertCircle />
+          <p>这次搜索没有完成</p>
+          <p style={{ fontSize: 12.5, color: "var(--error)" }}>{errorHint}</p>
+          <p style={{ fontSize: 12, opacity: 0.75 }}>
+            回到「发现歌曲」换个关键词再试，或切换音源 / 退出聚合搜索后重试
+          </p>
+        </div>
+      </div>
+    );
+  }
+  if (!list) {
+    return (
+      <div className="mp-scroll">
+        <div className="mp-state">
+          <Disc3 />
+          <p>播放列表还是空的</p>
+          <p style={{ fontSize: 12, opacity: 0.75 }}>
+            点击左上角「发现歌曲」，搜索歌名 / 歌手，或粘贴歌曲分享链接解析后即可点播
+          </p>
+        </div>
+      </div>
+    );
+  }
+  if (list.length === 0) {
+    return (
+      <div className="mp-scroll">
+        <div className="mp-state">
+          <Search />
+          <p>没有找到与「{searchedKw}」相关的歌曲</p>
+          <p style={{ fontSize: 12, opacity: 0.75 }}>
+            {aggMode
+              ? "已搜索全部可用音源均无匹配：换个关键词，或切到单源搜索细查"
+              : "换个关键词，或切换音源再试试"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <>
+      <div className="mp-list-head" aria-hidden="true">
+        <div className="mp-colhead">
+          <span className="mp-ch mp-ch-idx" />
+          <span className="mp-ch mp-ch-title">歌名</span>
+          <span className="mp-ch mp-ch-artist">艺术家</span>
+          <span className="mp-ch mp-ch-album">专辑</span>
+          <span className="mp-ch mp-ch-src">平台</span>
+          <span className="mp-ch mp-ch-line">线路</span>
+        </div>
+      </div>
+      <div
+        className="mp-scroll mp-list-scroll"
+        ref={listTopRef}
+        onScroll={handleListScroll}>
+        <div className="mp-tracklist">
+        {list.map((item, idx) => {
+          const isCurrent = currentIndex === idx;
+          // 首次取直链（尚无 direct）才展示行内加载动画；
+          // 播放中切音质不清空旧直链，保留 eq 动效避免闪烁
+          const loadingThis = fetching && isCurrent && !direct;
+          const isPlaying = isCurrent && playing;
+          const artist = artistText(item);
+          const line = musicLineMeta(item.line);
+          const sourceLabel = sourceMetaFor(item.source || source, sourceChips).label;
+          // 行 key 的唯一性由列表写入侧的 dedupeSearchItems 保证：同一 source:id 只会有一条
+          return (
+            <div
+              key={`${item.source}-${item.id}`}
+              className={cn("mp-row", isCurrent && "is-active")}
+              role="button"
+              tabIndex={0}
+              aria-label={`播放 ${item.name}`}
+              onClick={() => playTrack(item, idx)}
+              onKeyDown={(e) => {
+                // 仅响应行本体按键，避免行内子控件聚焦时回车误触播放
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  playTrack(item, idx);
+                }
+              }}>
+              <span className="mp-idx">{idx + 1}</span>
+              <span className="mp-cell mp-cell-title" title={item.name}>
+                <span className="mp-tt">{item.name}</span>
+                {isCurrent ? (
+                  loadingThis ? (
+                    <span className="mp-idx-load">
+                      <Loader2 className="mp-spin" />
+                    </span>
+                  ) : (
+                    <EqBars playing={isPlaying} />
+                  )
+                ) : (
+                  <span className="mp-hover-play">
+                    <Play />
+                  </span>
+                )}
+                {/* 收藏钮紧跟悬停播放钮，与歌名同处一列：图标是行的动作，不该飘到列尾 */}
+                <FavoriteButton item={item} onToggled={onFavoriteToggled} />
+              </span>
+              <span className="mp-cell mp-cell-artist" title={artist}>
+                {artist}
+              </span>
+              <span className="mp-cell mp-cell-album" title={item.album || ""}>
+                {item.album || "—"}
+              </span>
+              <span
+                className="mp-cell mp-cell-src"
+                title={sourceLabel}>
+                <PlatformIcon source={item.source || source} size={13} />
+                {sourceLabel}
+              </span>
+              <span
+                className={cn("mp-cell", "mp-cell-line", line?.direct && "is-direct")}
+                title={line?.title}>
+                {line ? (
+                  <>
+                    <i className="mp-line-dot" aria-hidden="true" />
+                    <span className="mp-line-text">{line.text}</span>
+                  </>
+                ) : (
+                  <span className="mp-line-none">—</span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {(paging || pageErr || !hasMore) && (
+        <div className="mp-loadmore" aria-live="polite">
+          {paging ? (
+            <>
+              <Loader2 className="mp-spin" />
+              正在加载更多…
+            </>
+          ) : pageErr ? (
+            <span className="mp-load-err">
+              <AlertCircle />
+              {pageErr}
+            </span>
+          ) : (
+            <span>已显示全部结果</span>
+          )}
+        </div>
+      )}
+      </div>
+    </>
+  );
+}

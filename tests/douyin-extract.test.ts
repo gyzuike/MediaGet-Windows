@@ -1,0 +1,219 @@
+// @ts-nocheck
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  tryParseEmbedded,
+  hasValidData,
+  parseVideoData,
+  extractFilterReason,
+  isChallengeHtml,
+  extractIdFromUrl,
+  extractTtwid,
+  isUserProfileUrl,
+  extractUserFromRouter,
+} from "@/lib/douyin-extract";
+
+// 页面快照：tests/snapshots/*.html
+// 平台改版后，用新页面 HTML 替换快照文件，跑本测试即可定位提取逻辑失效点。
+const snapshot = (name) =>
+  readFileSync(path.join(process.cwd(), "tests/snapshots", name), "utf-8");
+
+describe("douyin-extract：页面快照回归", () => {
+  const videoHtml = snapshot("douyin-share-video.html");
+  const noteHtml = snapshot("douyin-share-note.html");
+  const filteredHtml = snapshot("douyin-share-filtered.html");
+
+  it("标准视频分享页：解析出 _ROUTER_DATA 且数据有效", () => {
+    const parsed = tryParseEmbedded(videoHtml);
+    expect(parsed).not.toBeNull();
+    expect(hasValidData(parsed)).toBe(true);
+  });
+
+  it("标准视频分享页：提取 title/author/url/audioUrl/duration", () => {
+    const parsed = tryParseEmbedded(videoHtml);
+    const result = parseVideoData(parsed);
+    expect(result.code).toBe(200);
+    expect(result.data).toMatchObject({
+      title: "测试视频：快照回归",
+      author: "快照作者",
+      uid: "snapshot-author",
+      // playwm → play（无水印）
+      url: "https://v26-web.douyinvod.com/snapshot/play/video.mp4",
+      type: "video",
+      duration: 15000,
+      like: 888,
+      audioUrl: "https://sf6-cdn-tos.douyinstatic.com/music.mp3",
+    });
+  });
+
+  it("图文笔记分享页：识别为 image 并提取图集", () => {
+    const parsed = tryParseEmbedded(noteHtml);
+    expect(hasValidData(parsed)).toBe(true);
+    const result = parseVideoData(parsed);
+    expect(result.code).toBe(200);
+    expect(result.data.type).toBe("image");
+    expect(result.data.images).toHaveLength(2);
+    expect(result.data.cover).toBe("https://p3.douyinpic.com/img1.jpg");
+    expect(result.data.url).toBeUndefined();
+  });
+
+  it("被过滤页（SYSTEM_ITEM_NOT_EXIST）：数据无效但能提取原因", () => {
+    const parsed = tryParseEmbedded(filteredHtml);
+    expect(hasValidData(parsed)).toBe(false);
+    expect(extractFilterReason(parsed)).toBe("SYSTEM_ITEM_NOT_EXIST");
+    expect(parseVideoData(parsed)).toBeNull();
+  });
+
+  it("RENDER_DATA（URL 编码）格式也能解析", () => {
+    const payload = JSON.stringify({
+      loaderData: {
+        "video_(id)/page": {
+          videoInfoRes: { item_list: [{ desc: "render-data-ok" }] },
+        },
+      },
+    });
+    const html = `<script id="RENDER_DATA">${encodeURIComponent(payload)}</script>`;
+    const parsed = tryParseEmbedded(html);
+    expect(
+      parsed.loaderData["video_(id)/page"].videoInfoRes.item_list[0].desc
+    ).toBe("render-data-ok");
+  });
+
+  it("argus 反爬页：无数据块且识别为 challenge", () => {
+    const html = `<html><head><script src="/argus-csp-token"></script><script>var _$jsvmprt;</script></head></html>`;
+    expect(tryParseEmbedded(html)).toBeNull();
+    expect(isChallengeHtml(html)).toBe(true);
+  });
+
+  it("正常页面不被误判为反爬", () => {
+    expect(isChallengeHtml(videoHtml)).toBe(false);
+  });
+
+  it("从 URL 提取视频/图文 ID", () => {
+    expect(
+      extractIdFromUrl("https://www.iesdouyin.com/share/video/1234567890123456789")
+    ).toEqual({ id: "1234567890123456789", type: "video" });
+    expect(
+      extractIdFromUrl("https://www.iesdouyin.com/share/note/2345678901234567890")
+    ).toEqual({ id: "2345678901234567890", type: "note" });
+    expect(extractIdFromUrl("https://v.douyin.com/abc/")).toBeNull();
+  });
+
+  it("从跳转域名 target 参数提取 ID（wtturl.cn 等）", () => {
+    // 跳转服务失效时，target 参数里的完整抖音链接兜底可提取
+    expect(
+      extractIdFromUrl(
+        "https://link.wtturl.cn/?target=https%3A%2F%2Fwww.iesdouyin.com%2Fshare%2Fvideo%2F6891626572860706051"
+      )
+    ).toEqual({ id: "6891626572860706051", type: "video" });
+    // 无 target 参数的普通链接不受影响
+    expect(extractIdFromUrl("https://link.wtturl.cn/")).toBeNull();
+  });
+
+  it("识别用户主页分享链接（/share/user/ 与 sec_uid）", () => {
+    // 线上案例：v.douyin.com/pcLEV_tYdLs 短链实际跳转到 /share/user/
+    expect(
+      isUserProfileUrl(
+        "https://www.iesdouyin.com/share/user/MS4wLjABAAAAGsprZr-1bBuiEe_5eHTFoZbPsxiCKGY0Ewd_klNeaWg?with_sec_did=1&from_ssr=1"
+      )
+    ).toBe(true);
+    expect(
+      isUserProfileUrl(
+        "https://www.douyin.com/user/MS4wLjABAAAAGsprZr-1bBuiEe_5eHTFoZbPsxiCKGY0Ewd_klNeaWg?sec_uid=MS4wLjABAAAA"
+      )
+    ).toBe(true);
+    // 视频 / 图文分享链接不能被误判
+    expect(
+      isUserProfileUrl("https://www.iesdouyin.com/share/video/7389625411234567890")
+    ).toBe(false);
+    expect(
+      isUserProfileUrl("https://www.iesdouyin.com/share/note/7389625411234567890")
+    ).toBe(false);
+  });
+
+  it("从用户主页数据深度提取博主信息（粉丝/关注/获赞）", () => {
+    const routerData = {
+      loaderData: {
+        "user/profile/page": {
+          userInfoRes: {
+            user: {
+              nickname: "博主",
+              follower_count: 12345,
+              following_count: 67,
+              total_favorited: "89012",
+            },
+          },
+        },
+      },
+    };
+    const user = extractUserFromRouter(routerData);
+    expect(user).not.toBeNull();
+    expect(user).toMatchObject({
+      nickname: "博主",
+      follower_count: 12345,
+      following_count: 67,
+      total_favorited: "89012",
+    });
+    // 无用户信息的数据返回 null
+    expect(extractUserFromRouter({ loaderData: {} })).toBeNull();
+    expect(extractUserFromRouter(null)).toBeNull();
+  });
+
+  it("bit_rate 档位表：去水印后按高度降序透出，主直链跟最高档", () => {
+    const item = (bitRates) => ({
+      loaderData: {
+        "video_(id)/page": {
+          videoInfoRes: {
+            item_list: [
+              {
+                desc: "档位视频",
+                aweme_type: 0,
+                author: { nickname: "达", unique_id: "dy" },
+                video: {
+                  duration: 10000,
+                  play_addr: {
+                    uri: "v0d00",
+                    height: 720,
+                    url_list: ["https://v.douyin.com/playwm/default.mp4"],
+                  },
+                  bit_rate: bitRates,
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const tier = (gear, height, file) => ({
+      gear_name: gear,
+      bit_rate: height * 1000,
+      play_addr: { height, url_list: [`https://v.douyin.com/playwm/${file}`] },
+    });
+
+    const multi = parseVideoData(
+      item([tier("720p", 720, "720.mp4"), tier("1080p", 1080, "1080.mp4")])
+    );
+    expect(multi.code).toBe(200);
+    expect(multi.data.qualities).toEqual([
+      { quality: 1080, label: "1080p", url: "https://v.douyin.com/play/1080.mp4" },
+      { quality: 720, label: "720p", url: "https://v.douyin.com/play/720.mp4" },
+    ]);
+    expect(multi.data.url).toBe("https://v.douyin.com/play/1080.mp4");
+
+    // 只有一档：不出下拉，主直链仍走 play_addr 默认档
+    const single = parseVideoData(item([tier("720p", 720, "only.mp4")]));
+    expect("qualities" in single.data).toBe(false);
+    expect(single.data.url).toBe("https://v.douyin.com/play/default.mp4");
+  });
+
+  it("从响应头提取 ttwid", () => {
+    const res = new Response(null, {
+      headers: {
+        "set-cookie": "ttwid=abc123; Path=/; Max-Age=31536000",
+      },
+    });
+    expect(extractTtwid(res)).toBe("ttwid=abc123");
+    expect(extractTtwid(new Response(null))).toBe("");
+  });
+});
