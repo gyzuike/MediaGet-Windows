@@ -1,3 +1,5 @@
+## 后端来自 [hotier/MediaGet](https://github.com/hotier/MediaGet)，前端完全由 Codex 完成，作者屌毛不会
+
 # MediaGet 完整源码（Windows 最终整合版）
 
 这一份项目包含原始网页前端、解析后台和全部最终 Windows 桌面功能。无需再按顺序应用旧版“源码补充”ZIP，也无需修改构建后的 JS 分块。
