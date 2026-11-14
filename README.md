@@ -1,4 +1,10 @@
-## 后端来自 [hotier/MediaGet](https://github.com/hotier/MediaGet)，前端完全由 Codex 完成，作者屌毛不会
+## 后端来自 [hotier/MediaGet](https://github.com/hotier/MediaGet)，前端完全由 Codex 完成，作者屌毛不会.
+## 为什么做这个
+### 剪视频时候经常要去抖音找素材，然后去其他网站解析，后来那几个网站又要登录又要关注公众号什么的，就干脆自己搞了个web版。
+
+后来有一次赶上服务器抽风，一个几M的视频半天下不来，就想干脆搞一个桌面版算了，因此就在github上找了个近期有维护而且好用的后端，也就是 [hotier大神的MediaGet](https://github.com/hotier/MediaGet)，再用AI生成了Windows版本。
+
+我不懂编程，codex也到期了，因此没有能力再解决任何问题，这个发布版就是最终版本了。其实后端我是没打算上传的，直接去人家原作者那里拖就好，但是我让AI上传的时候它全给传上来了，我也就没再动，毕竟git对于一个非程序员来说还是挺麻烦的
 
 # MediaGet 完整源码（Windows 最终整合版）
 
